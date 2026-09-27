@@ -1520,7 +1520,6 @@ async def vip(interaction: discord.Interaction):
         await interaction.response.send_message("📭 No OOPZ roster is loaded yet.", ephemeral=True)
         return
 
-    # Record first-seen dates for roster UIDs. This makes the 7-day newcomer rule persistent.
     now = now_utc()
     for name, info in roster.items():
         uid = str(info.get("player_uid") or "").strip()
@@ -1558,7 +1557,6 @@ async def vip(interaction: discord.Interaction):
     already_picked = {str(r["player_uid"]) for r in picked_rows}
     remaining = [(uid, name) for uid, name in eligible if uid not in already_picked]
 
-    # A completed round resets automatically. Members who left the roster do not block it.
     if not remaining:
         await db_execute("DELETE FROM vip_turns")
         remaining = eligible
@@ -1585,7 +1583,41 @@ async def vip(interaction: discord.Interaction):
         inline=False,
     )
     embed.set_footer(text="New OOPZ members become eligible after 7 days.")
-    await interaction.response.send_message(embed=embed)
+
+    view = VIPRerollView(uid, winner, interaction.user.id)
+    await interaction.response.send_message(embed=embed, view=view)
+
+
+class VIPRerollView(discord.ui.View):
+    def __init__(self, player_uid: str, player_name: str, picker_id: int):
+        super().__init__(timeout=3600)
+        self.player_uid = player_uid
+        self.player_name = player_name
+        self.picker_id = picker_id
+
+    @discord.ui.button(label="VIP unavailable — reroll", style=discord.ButtonStyle.danger, emoji="🔄")
+    async def reroll(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.picker_id:
+            await interaction.response.send_message(
+                "Only the person who ran /vip can reroll this pick.",
+                ephemeral=True,
+            )
+            return
+
+        # Remove this unavailable player from the current turn so they remain eligible
+        # next time instead of losing their place in the fair rotation.
+        await db_execute("DELETE FROM vip_turns WHERE player_uid = ?", (self.player_uid,))
+        try:
+            await interaction.message.delete()
+        except discord.HTTPException:
+            pass
+
+        # Tell the command user privately to run /vip again. The deleted player remains
+        # eligible because their turn was rolled back.
+        await interaction.response.send_message(
+            f"↩️ **{self.player_name}** was marked unavailable and their VIP turn was restored. Run **/vip** again for a new random pick.",
+            ephemeral=True,
+        )
 
 
 @bot.tree.command(name="t10", description="Get your personal OOPZ T10 / Special Forces roadmap")
