@@ -23,7 +23,7 @@ load_dotenv()
 
 TOKEN = os.environ["DISCORD_TOKEN"]
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-flash").strip()
+GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-3.8-flash").strip()
 GUILD_ID = int(os.environ["GUILD_ID"])
 ROSTER_CHANNEL_ID = int(os.environ["ROSTER_CHANNEL_ID"])
 LOG_CHANNEL_ID = int(os.environ["LOG_CHANNEL_ID"])
