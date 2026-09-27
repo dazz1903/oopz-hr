@@ -1611,15 +1611,13 @@ async def t10(
                 scan_text, progress_summary = summarize_special_forces_scan(scan)
                 if len(scan_text) > 1024:
                     scan_text = scan_text[:1018] + "…"
-                embed.add_field(name="📊 Your scanned progress", value=progress_summary, inline=False)
-                embed.add_field(name="🧠 Detected research levels", value=scan_text, inline=False)
                 next_moves = get_t10_next_moves(scan, hq)
                 if next_moves:
-                    coaching_text = "\n".join(f"{i}. {move}" for i, move in enumerate(next_moves, start=1))
-                    embed.add_field(name="🎯 Your next T10 moves", value=coaching_text[:1024], inline=False)
+                    coaching_text = "\n".join(f"**{i}.** {move}" for i, move in enumerate(next_moves, start=1))
+                    embed.add_field(name="🎯 HR's T10 coaching", value=coaching_text[:1024], inline=False)
                 embed.add_field(
-                    name="🗺️ Tree mapping",
-                    value="All 23 Special Forces nodes are mapped. HR matches the scanned row/position to the verified research name and will not invent unreadable levels.",
+                    name="📊 Progress snapshot",
+                    value=progress_summary,
                     inline=False,
                 )
                 notes = scan.get("notes") or []
