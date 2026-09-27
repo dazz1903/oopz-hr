@@ -1453,21 +1453,34 @@ Number rows and order from top to bottom. If a value is unreadable, omit that no
     return await asyncio.to_thread(run_gemini)
 
 
-def format_special_forces_scan(scan: dict) -> str:
+def summarize_special_forces_scan(scan: dict) -> tuple[str, str]:
     nodes = scan.get("nodes") or []
     if not nodes:
-        return "I couldn't confidently read any research levels from these screenshots."
-    lines = []
+        return "I couldn't confidently read any research levels from these screenshots.", "Progress unavailable"
+    lines, earned, possible, complete_nodes = [], 0, 0, 0
     for node in nodes[:30]:
         row = node.get("row", "?")
         column = str(node.get("column", "other")).title()
         progress = str(node.get("progress_text", "?"))
+        current, maximum = node.get("current_level"), node.get("max_level")
+        if isinstance(current, int) and isinstance(maximum, int) and maximum > 0:
+            earned += max(0, min(current, maximum))
+            possible += maximum
+            if current >= maximum:
+                complete_nodes += 1
         confidence = node.get("confidence")
         suffix = " ⚠️" if isinstance(confidence, (int, float)) and confidence < 0.8 else ""
         lines.append(f"• Row {row} • {column}: **{progress}**{suffix}")
     if len(nodes) > 30:
         lines.append(f"• …and {len(nodes) - 30} more nodes")
-    return "\n".join(lines)
+    percent = round((earned / possible) * 100, 1) if possible else 0
+    summary = (
+        f"**Visible tree progress:** {percent}%\n"
+        f"**Research levels complete:** {earned}/{possible}\n"
+        f"**Levels remaining:** {max(0, possible - earned)}\n"
+        f"**Fully completed nodes:** {complete_nodes}/{len(nodes)}"
+    )
+    return "\n".join(lines), summary
 
 
 @bot.tree.command(name="t10", description="Get your personal OOPZ T10 / Special Forces roadmap")
@@ -1585,10 +1598,12 @@ async def t10(
             await interaction.response.defer(ephemeral=True, thinking=True)
             try:
                 scan = await analyze_special_forces_screenshots(screenshots)
-                scan_text = format_special_forces_scan(scan)
+                scan_text, progress_summary = summarize_special_forces_scan(scan)
                 if len(scan_text) > 1024:
                     scan_text = scan_text[:1018] + "…"
-                embed.add_field(name="🧠 Special Forces scan", value=scan_text, inline=False)
+                embed.add_field(name="📊 Your scanned progress", value=progress_summary, inline=False)
+                embed.add_field(name="🧠 Detected research levels", value=scan_text, inline=False)
+                embed.add_field(name="🧮 Gold & Valor remaining", value="Pending exact node mapping — HR will not guess costs from icons.", inline=False)
                 notes = scan.get("notes") or []
                 if notes:
                     note_text = "\n".join(f"• {n}" for n in notes[:4])
