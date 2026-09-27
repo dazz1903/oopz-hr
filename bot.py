@@ -1559,37 +1559,48 @@ async def build_vip_pick(interaction: discord.Interaction, test_mode: bool = Fal
                 (name, uid),
             )
 
-    seen = await db_fetchall("SELECT player_uid, first_seen_at FROM vip_join_dates")
-    first_seen = {str(r["player_uid"]): parse_iso(r["first_seen_at"]) for r in seen}
-    eligible = []
-    for name, info in roster.items():
-        uid = str(info.get("player_uid") or "").strip()
-        if not uid:
-            continue
-        joined = first_seen.get(uid)
-        # Test mode deliberately ignores the 7-day tenure gate so R4/R5 can always
-        # verify the picker. Real /vip still enforces the newcomer rule.
-        if test_mode or (joined and now - joined >= timedelta(days=7)):
-            eligible.append((uid, name))
-
-    if not eligible:
-        await interaction.response.send_message(
-            "🚂 Nobody is VIP-eligible yet. New members must be in OOPZ for 7 days first.",
-            ephemeral=True,
-        )
-        return
-
-    # Test mode never reads or writes the real rotation.
+    # Test mode: every current roster player with a PlayerUID is eligible.
+    # It does not use join dates or the real VIP rotation at all.
     if test_mode:
+        eligible = [
+            (str(info.get("player_uid") or "").strip(), name)
+            for name, info in roster.items()
+            if str(info.get("player_uid") or "").strip()
+        ]
+        if not eligible:
+            await interaction.response.send_message(
+                "🧪 VIP test could not find any current roster players with a PlayerUID.",
+                ephemeral=True,
+            )
+            return
         uid, winner = secrets.choice(eligible)
         left_after = len(eligible) - 1
     else:
+        seen = await db_fetchall("SELECT player_uid, first_seen_at FROM vip_join_dates")
+        first_seen = {str(r["player_uid"]): parse_iso(r["first_seen_at"]) for r in seen}
+        eligible = []
+        for name, info in roster.items():
+            uid = str(info.get("player_uid") or "").strip()
+            if not uid:
+                continue
+            joined = first_seen.get(uid)
+            if joined and now - joined >= timedelta(days=7):
+                eligible.append((uid, name))
+
+        if not eligible:
+            await interaction.response.send_message(
+                "🚂 Nobody is VIP-eligible yet. New members must be in OOPZ for 7 days first.",
+                ephemeral=True,
+            )
+            return
+
         picked_rows = await db_fetchall("SELECT player_uid FROM vip_turns")
         already_picked = {str(r["player_uid"]) for r in picked_rows}
         remaining = [(uid, name) for uid, name in eligible if uid not in already_picked]
         if not remaining:
             await db_execute("DELETE FROM vip_turns")
             remaining = eligible
+
         uid, winner = secrets.choice(remaining)
         await db_execute(
             """INSERT OR REPLACE INTO vip_turns (player_uid, player_name, last_picked_at)
