@@ -13,6 +13,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
+from t10_coach import T10_RESEARCH, T10_TOTAL_GOLD, T10_TOTAL_VALOR, T10_REQUIREMENTS, get_hq_advice
 
 load_dotenv()
 
@@ -1389,6 +1390,83 @@ async def before_grace_period_check():
 
 def admin_only(interaction: discord.Interaction) -> bool:
     return bool(interaction.user.guild_permissions.manage_guild)
+
+
+@bot.tree.command(name="t10", description="Get your personal OOPZ T10 / Special Forces roadmap")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def t10(interaction: discord.Interaction):
+    """Give any roster-linked OOPZ member a T10 roadmap using their current HQ."""
+    if not interaction.guild or not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("🚫 This command only works inside the OOPZ server.", ephemeral=True)
+        return
+
+    roster = await get_roster()
+    if not roster:
+        await interaction.response.send_message("📭 I don't have an OOPZ roster loaded yet. Ask leadership to upload the latest LWMA CSV.", ephemeral=True)
+        return
+
+    row = await db_fetchone("SELECT * FROM members WHERE discord_id = ?", (interaction.user.id,))
+    identity = await resolve_roster_identity(interaction.user, roster, row)
+    if not identity:
+        await interaction.response.send_message(
+            "🕵️ I can't connect your Discord account to the current OOPZ roster yet. "
+            "Ask Queen/R4 to use `/link_member` for you, then try `/t10` again.",
+            ephemeral=True,
+        )
+        return
+
+    game_name, info = identity
+    hq = info.get("level")
+    if hq is None:
+        await interaction.response.send_message(
+            f"🧮 I found you as **{game_name}**, but your HQ level is missing from the current roster.",
+            ephemeral=True,
+        )
+        return
+
+    research_lines = [
+        f"• **{item['name']}** — {item['gold_total'] / 1_000_000_000:.2f}B Gold • {item['valor_total']:,} Valor"
+        for item in T10_RESEARCH.values()
+    ]
+
+    if hq < 27:
+        milestone = "**First milestone:** HQ27 → unlock T9. Keep building your Gold and Valor stockpile while you push HQ."
+    elif hq < 30:
+        milestone = (
+            f"**Current milestone:** HQ{hq} → HQ30. Keep advancing Special Forces now; "
+            "the final two research rows (levels 9–10) require **HQ30 + Tech Center 30**."
+        )
+    else:
+        milestone = (
+            "**HQ30 reached.** Finish **Tech Center 30** for the final research rows. "
+            "**Unit X / T10 also requires Barracks 30**."
+        )
+
+    embed = discord.Embed(
+        title="🔥 OOPZ T10 Coach",
+        description=f"**{game_name} • HQ{hq}**\n\n{get_hq_advice(hq)}",
+        timestamp=now_utc(),
+    )
+    embed.add_field(name="🎯 Your next milestone", value=milestone, inline=False)
+    embed.add_field(name="🧪 Full T10 research path", value="\n".join(research_lines), inline=False)
+    embed.add_field(
+        name="💰 Full path cost",
+        value=f"**Gold:** {T10_TOTAL_GOLD / 1_000_000_000:.2f}B\n**Valor Badges:** {T10_TOTAL_VALOR:,}",
+        inline=False,
+    )
+    embed.add_field(
+        name="🔒 Final requirements",
+        value=(
+            f"Research levels 9–10: **HQ{T10_REQUIREMENTS['final_nodes']['hq']} + "
+            f"Tech Center {T10_REQUIREMENTS['final_nodes']['tech_center']}**\n"
+            f"Unit X / T10: **HQ{T10_REQUIREMENTS['unit_x']['hq']} + "
+            f"Tech Center {T10_REQUIREMENTS['unit_x']['tech_center']} + "
+            f"Barracks {T10_REQUIREMENTS['unit_x']['barracks']}**"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="OOPZ Growth Department • based on your latest roster HQ")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="roster_status", description="Show current OOPZ roster bot status")
