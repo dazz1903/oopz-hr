@@ -24,6 +24,7 @@ load_dotenv()
 TOKEN = os.environ["DISCORD_TOKEN"]
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-3.8-flash").strip()
+GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.8-flash-lite").strip()
 GUILD_ID = int(os.environ["GUILD_ID"])
 ROSTER_CHANNEL_ID = int(os.environ["ROSTER_CHANNEL_ID"])
 LOG_CHANNEL_ID = int(os.environ["LOG_CHANNEL_ID"])
@@ -1425,11 +1426,23 @@ Number rows and order from top to bottom. If a value is unreadable, omit that no
 
     def run_gemini():
         client = genai.Client(api_key=GEMINI_API_KEY)
-        response = client.models.generate_content(
-            model=GEMINI_VISION_MODEL,
-            contents=parts,
-            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0),
-        )
+        config = types.GenerateContentConfig(response_mime_type="application/json", temperature=0)
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_VISION_MODEL,
+                contents=parts,
+                config=config,
+            )
+        except Exception as exc:
+            error_text = str(exc)
+            if ("503" not in error_text and "UNAVAILABLE" not in error_text) or not GEMINI_FALLBACK_MODEL:
+                raise
+            logging.warning("Gemini primary model unavailable; retrying with fallback model %s", GEMINI_FALLBACK_MODEL)
+            response = client.models.generate_content(
+                model=GEMINI_FALLBACK_MODEL,
+                contents=parts,
+                config=config,
+            )
         return json.loads(response.text)
 
     return await asyncio.to_thread(run_gemini)
