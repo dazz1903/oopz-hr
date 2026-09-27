@@ -136,43 +136,43 @@ def scan_levels_by_position(scan: dict) -> dict[tuple[int, str], int]:
 
 
 def get_t10_next_moves(scan: dict, hq_level: int) -> list[str]:
-    """Return only coaching steps supported by verified prerequisite data."""
+    """Coach the shortest verified route toward Unit X/T10."""
     levels = scan_levels_by_position(scan)
     moves = []
 
-    # Immediate blocker visible in the mapped mid-tree.
-    morale = levels.get((6, "center"))
-    hp2 = levels.get((5, "left"))
-    defense2 = levels.get((5, "right"))
-    if morale is not None and morale < 10:
-        blockers = []
-        if hp2 is not None and hp2 < 5:
-            blockers.append(f"HP Boost II {hp2} → 5")
-        if defense2 is not None and defense2 < 5:
-            blockers.append(f"Defense Boost II {defense2} → 5")
-        if blockers:
-            moves.extend(blockers)
-            moves.append("Then continue Morale — its next research is blocked until both reach Lv.5.")
-            return moves
-
-    # Final T10 wall. Unit X explicitly depends on HP Boost III 10.
     unit_x = levels.get((11, "center"))
     hp3 = levels.get((10, "left"))
     ap_final = levels.get((9, "center"))
-    if unit_x == 0:
-        if hp3 is not None and hp3 < 10:
-            if ap_final is not None and ap_final < 2:
-                moves.append(f"Advanced Protection {ap_final} → 2 to open HP Boost III progression.")
-            moves.append(f"Push HP Boost III {hp3} → 10 — Unit X explicitly requires Lv.10.")
-        if hq_level < 30:
-            moves.append(f"Push HQ{hq_level} → HQ30; Unit X requires Tech Center 30.")
-        else:
-            moves.append("Make sure Tech Center is Lv.30 for Unit X.")
-        moves.append("After Unit X unlocks, Barracks 30 is required to train T10 units.")
-        return moves
 
     if unit_x == 1:
-        moves.append("Unit X is unlocked. Get Barracks 30 if needed, then train T10 units.")
+        return ["Unit X is unlocked. Get Barracks 30 if needed, then train T10 units."]
+
+    # Unit X's verified direct research dependency is HP Boost III Lv.10.
+    # Do not recommend side branches merely because they were prerequisites earlier
+    # in the tree when the player has already progressed beyond them.
+    if hp3 is not None:
+        if hp3 < 10:
+            if ap_final is not None and ap_final < 2:
+                moves.append(f"Raise Advanced Protection {ap_final} → 2 first — HP Boost III requires it.")
+            target = 8 if hq_level < 30 else 10
+            if hp3 < target:
+                moves.append(
+                    f"Push HP Boost III {hp3} → {target}. "
+                    + ("Take it as far as you can before HQ30; levels 9–10 are the HQ30 wall." if hq_level < 30 else "This is the direct research requirement for Unit X.")
+                )
+            elif hq_level < 30:
+                moves.append("HP Boost III is at the pre-HQ30 wall. Save Gold/resources for levels 9–10.")
+        if hq_level < 30:
+            moves.append(f"Push HQ{hq_level} → HQ30 and Tech Center → 30 to open the final research levels.")
+        else:
+            moves.append("Make sure Tech Center is Lv.30, then finish HP Boost III to Lv.10.")
+        moves.append("Unlock Unit X, then use Barracks 30 to train T10 units.")
         return moves
 
+    # Fallback only when the lower part of the tree was not visible/read.
+    if hq_level < 30:
+        moves.append(f"Push HQ{hq_level} → HQ30 while continuing the verified route toward HP Boost III.")
+    else:
+        moves.append("Prioritize the verified route to HP Boost III Lv.10, then unlock Unit X.")
     return moves
+
