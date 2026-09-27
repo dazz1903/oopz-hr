@@ -105,3 +105,74 @@ def get_hq_advice(hq_level: int) -> str:
         "HQ30 reached. Prioritize Tech Center 30 for the final Special Forces "
         "research and Barracks 30 so you can train T10 units after Unit X unlocks."
     )
+
+
+# Verified prerequisite rules from OOPZ in-game research popups.
+# Keys use row/column so duplicate names such as Advanced Protection stay unambiguous.
+T10_PREREQUISITES = {
+    (6, "center"): [((5, "left"), 5), ((5, "right"), 5)],  # Morale
+    (7, "left"): [((6, "center"), 4)],
+    (7, "center"): [((6, "center"), 4)],
+    (7, "right"): [((6, "center"), 4)],
+    (10, "left"): [((9, "center"), 2)],
+    (10, "center"): [((9, "center"), 2)],
+    (10, "right"): [((9, "center"), 1)],
+    (11, "center"): [((10, "left"), 10)],  # Unit X
+}
+
+
+def scan_levels_by_position(scan: dict) -> dict[tuple[int, str], int]:
+    """Normalize Gemini scan output into {(row, column): current_level}."""
+    levels = {}
+    for node in scan.get("nodes") or []:
+        try:
+            row = int(node.get("row"))
+            column = str(node.get("column") or "").lower()
+            current = int(node.get("current_level"))
+        except (TypeError, ValueError):
+            continue
+        levels[(row, column)] = current
+    return levels
+
+
+def get_t10_next_moves(scan: dict, hq_level: int) -> list[str]:
+    """Return only coaching steps supported by verified prerequisite data."""
+    levels = scan_levels_by_position(scan)
+    moves = []
+
+    # Immediate blocker visible in the mapped mid-tree.
+    morale = levels.get((6, "center"))
+    hp2 = levels.get((5, "left"))
+    defense2 = levels.get((5, "right"))
+    if morale is not None and morale < 10:
+        blockers = []
+        if hp2 is not None and hp2 < 5:
+            blockers.append(f"HP Boost II {hp2} → 5")
+        if defense2 is not None and defense2 < 5:
+            blockers.append(f"Defense Boost II {defense2} → 5")
+        if blockers:
+            moves.extend(blockers)
+            moves.append("Then continue Morale — its next research is blocked until both reach Lv.5.")
+            return moves
+
+    # Final T10 wall. Unit X explicitly depends on HP Boost III 10.
+    unit_x = levels.get((11, "center"))
+    hp3 = levels.get((10, "left"))
+    ap_final = levels.get((9, "center"))
+    if unit_x == 0:
+        if hp3 is not None and hp3 < 10:
+            if ap_final is not None and ap_final < 2:
+                moves.append(f"Advanced Protection {ap_final} → 2 to open HP Boost III progression.")
+            moves.append(f"Push HP Boost III {hp3} → 10 — Unit X explicitly requires Lv.10.")
+        if hq_level < 30:
+            moves.append(f"Push HQ{hq_level} → HQ30; Unit X requires Tech Center 30.")
+        else:
+            moves.append("Make sure Tech Center is Lv.30 for Unit X.")
+        moves.append("After Unit X unlocks, Barracks 30 is required to train T10 units.")
+        return moves
+
+    if unit_x == 1:
+        moves.append("Unit X is unlocked. Get Barracks 30 if needed, then train T10 units.")
+        return moves
+
+    return moves
