@@ -1507,49 +1507,60 @@ def summarize_special_forces_scan(scan: dict) -> tuple[str, str]:
     return "\n".join(lines), summary
 
 
-@bot.tree.command(name="vip", description="Randomly pick the next fair OOPZ train VIP")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def vip(interaction: discord.Interaction):
-    """Pick one eligible roster member; everyone gets a turn before repeats."""
-    if not interaction.guild or not isinstance(interaction.user, discord.Member):
-        await interaction.response.send_message("🚫 This command only works inside the OOPZ server.", ephemeral=True)
-        return
+def is_r4_or_higher(member: discord.Member) -> bool:
+    """Allow R4/R5 by configured role ID or the standard OOPZ role names."""
+    configured = RANK_ROLE_IDS.get(4)
+    if configured and any(role.id == configured for role in member.roles):
+        return True
+    return any(
+        role.name in {RANK_ROLE_NAMES[4], RANK_ROLE_NAMES[5]} or role.name.strip().lower() in {"r4", "r5"}
+        for role in member.roles
+    )
 
+
+async def build_vip_pick(interaction: discord.Interaction, test_mode: bool = False):
     roster = await get_roster()
     if not roster:
         await interaction.response.send_message("📭 No OOPZ roster is loaded yet.", ephemeral=True)
         return
 
     now = now_utc()
-    vip_seen_count_row = await db_fetchone("SELECT COUNT(*) AS count FROM vip_join_dates")
-    grandfather_current_roster = not vip_seen_count_row or int(vip_seen_count_row["count"]) == 0
-    initial_seen_at = now - timedelta(days=8) if grandfather_current_roster else now
+
+    # One-time hard grandfather: everyone who is on the roster when this version first
+    # runs is considered an established member. The marker prevents future joiners from
+    # being grandfathered accidentally.
+    grandfather_done = await db_fetchone("SELECT value FROM meta WHERE key = 'vip_grandfather_v2'")
+    if not grandfather_done:
+        established = iso(now - timedelta(days=8))
+        for name, info in roster.items():
+            uid = str(info.get("player_uid") or "").strip()
+            if uid:
+                await db_execute(
+                    """INSERT OR REPLACE INTO vip_join_dates (player_uid, player_name, first_seen_at)
+                       VALUES (?, ?, ?)""",
+                    (uid, name, established),
+                )
+        await db_execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('vip_grandfather_v2', ?)",
+            (iso(now),),
+        )
+
+    # After grandfathering, genuinely new roster UIDs start their real 7-day wait.
     for name, info in roster.items():
         uid = str(info.get("player_uid") or "").strip()
         if uid:
             await db_execute(
                 """INSERT OR IGNORE INTO vip_join_dates (player_uid, player_name, first_seen_at)
                    VALUES (?, ?, ?)""",
-                (uid, name, iso(initial_seen_at)),
+                (uid, name, iso(now)),
             )
             await db_execute(
                 "UPDATE vip_join_dates SET player_name = ? WHERE player_uid = ?",
                 (name, uid),
             )
 
-    # Migration for the first live test: the previous version stamped the whole existing
-    # roster as "new today". If no VIP has ever been picked, grandfather that initial cohort.
-    picked_count_row = await db_fetchone("SELECT COUNT(*) AS count FROM vip_turns")
-    if not picked_count_row or int(picked_count_row["count"]) == 0:
-        cutoff = now - timedelta(days=7)
-        await db_execute(
-            "UPDATE vip_join_dates SET first_seen_at = ? WHERE first_seen_at > ?",
-            (iso(now - timedelta(days=8)), iso(cutoff)),
-        )
-
     seen = await db_fetchall("SELECT player_uid, first_seen_at FROM vip_join_dates")
     first_seen = {str(r["player_uid"]): parse_iso(r["first_seen_at"]) for r in seen}
-
     eligible = []
     for name, info in roster.items():
         uid = str(info.get("player_uid") or "").strip()
@@ -1566,24 +1577,25 @@ async def vip(interaction: discord.Interaction):
         )
         return
 
-    picked_rows = await db_fetchall("SELECT player_uid FROM vip_turns")
-    already_picked = {str(r["player_uid"]) for r in picked_rows}
-    remaining = [(uid, name) for uid, name in eligible if uid not in already_picked]
+    # Test mode never reads or writes the real rotation.
+    if test_mode:
+        uid, winner = secrets.choice(eligible)
+        left_after = len(eligible) - 1
+    else:
+        picked_rows = await db_fetchall("SELECT player_uid FROM vip_turns")
+        already_picked = {str(r["player_uid"]) for r in picked_rows}
+        remaining = [(uid, name) for uid, name in eligible if uid not in already_picked]
+        if not remaining:
+            await db_execute("DELETE FROM vip_turns")
+            remaining = eligible
+        uid, winner = secrets.choice(remaining)
+        await db_execute(
+            """INSERT OR REPLACE INTO vip_turns (player_uid, player_name, last_picked_at)
+               VALUES (?, ?, ?)""",
+            (uid, winner, iso(now)),
+        )
+        left_after = len(remaining) - 1
 
-    if not remaining:
-        await db_execute("DELETE FROM vip_turns")
-        remaining = eligible
-
-    uid, winner = secrets.choice(remaining)
-    await db_execute(
-        """INSERT OR REPLACE INTO vip_turns (player_uid, player_name, last_picked_at)
-           VALUES (?, ?, ?)""",
-        (uid, winner, iso(now)),
-    )
-
-    left_after = len(remaining) - 1
-
-    # Tag the winner when their PlayerUID is linked to a current Discord member.
     linked_row = await db_fetchone(
         "SELECT discord_id FROM members WHERE last_verified_uid = ?",
         (uid,),
@@ -1596,8 +1608,9 @@ async def vip(interaction: discord.Interaction):
             winner_display = discord_member.mention
             allowed_mentions = discord.AllowedMentions(users=True)
 
+    title = "🧪 OOPZ TRAIN VIP — TEST" if test_mode else "🏆✨ OOPZ TRAIN VIP ✨🏆"
     embed = discord.Embed(
-        title="🏆✨ OOPZ TRAIN VIP ✨🏆",
+        title=title,
         description=(
             "The train has chosen its VIP! 🚂💨\n\n"
             f"🎟️ **Congratulations {winner_display}!**\n"
@@ -1606,50 +1619,82 @@ async def vip(interaction: discord.Interaction):
         ),
         timestamp=now,
     )
-    embed.add_field(
-        name="🎲 Fair VIP Rotation",
-        value=(
-            f"**{left_after}** eligible member{'s' if left_after != 1 else ''} "
-            "still need a turn before everyone goes back into the draw."
-        ),
-        inline=False,
-    )
+    if test_mode:
+        embed.add_field(
+            name="🧪 Test only",
+            value="This pick does **not** count as a VIP turn and does not change the real rotation.",
+            inline=False,
+        )
+    else:
+        embed.add_field(
+            name="🎲 Fair VIP Rotation",
+            value=(
+                f"**{left_after}** eligible member{'s' if left_after != 1 else ''} "
+                "still need a turn before everyone goes back into the draw."
+            ),
+            inline=False,
+        )
     embed.set_footer(text="Everyone gets a turn • New members join the draw after 7 days")
 
-    view = VIPRerollView(uid, winner, interaction.user.id)
+    view = VIPRerollView(uid, winner, interaction.user.id, test_mode=test_mode)
     await interaction.response.send_message(embed=embed, view=view, allowed_mentions=allowed_mentions)
 
 
+@bot.tree.command(name="vip", description="Randomly pick the next fair OOPZ train VIP")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def vip(interaction: discord.Interaction):
+    if not interaction.guild or not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("🚫 This command only works inside the OOPZ server.", ephemeral=True)
+        return
+    await build_vip_pick(interaction, test_mode=False)
+
+
+@bot.tree.command(name="vip_test", description="R4/R5: test the OOPZ VIP picker without changing rotation")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def vip_test(interaction: discord.Interaction):
+    if not interaction.guild or not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("🚫 This command only works inside the OOPZ server.", ephemeral=True)
+        return
+    if not is_r4_or_higher(interaction.user):
+        await interaction.response.send_message("🔒 The VIP test is available to R4/R5 only.", ephemeral=True)
+        return
+    await build_vip_pick(interaction, test_mode=True)
+
+
 class VIPRerollView(discord.ui.View):
-    def __init__(self, player_uid: str, player_name: str, picker_id: int):
+    def __init__(self, player_uid: str, player_name: str, picker_id: int, test_mode: bool = False):
         super().__init__(timeout=3600)
         self.player_uid = player_uid
         self.player_name = player_name
         self.picker_id = picker_id
+        self.test_mode = test_mode
 
     @discord.ui.button(label="VIP unavailable — reroll", style=discord.ButtonStyle.danger, emoji="🔄")
     async def reroll(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.picker_id:
             await interaction.response.send_message(
-                "Only the person who ran /vip can reroll this pick.",
+                "Only the person who ran the VIP picker can reroll this pick.",
                 ephemeral=True,
             )
             return
 
-        # Remove this unavailable player from the current turn so they remain eligible
-        # next time instead of losing their place in the fair rotation.
-        await db_execute("DELETE FROM vip_turns WHERE player_uid = ?", (self.player_uid,))
+        if not self.test_mode:
+            await db_execute("DELETE FROM vip_turns WHERE player_uid = ?", (self.player_uid,))
         try:
             await interaction.message.delete()
         except discord.HTTPException:
             pass
 
-        # Tell the command user privately to run /vip again. The deleted player remains
-        # eligible because their turn was rolled back.
-        await interaction.response.send_message(
-            f"↩️ **{self.player_name}** was marked unavailable and their VIP turn was restored. Run **/vip** again for a new random pick.",
-            ephemeral=True,
-        )
+        if self.test_mode:
+            await interaction.response.send_message(
+                "🧪 Test result deleted. Nothing was changed in the real VIP rotation.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                f"↩️ **{self.player_name}** was marked unavailable and their VIP turn was restored. Run **/vip** again for a new random pick.",
+                ephemeral=True,
+            )
 
 
 @bot.tree.command(name="t10", description="Get your personal OOPZ T10 / Special Forces roadmap")
