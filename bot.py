@@ -17,7 +17,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-from t10_coach import T10_RESEARCH, T10_TOTAL_GOLD, T10_TOTAL_VALOR, T10_REQUIREMENTS, get_hq_advice
+from t10_coach import T10_RESEARCH, T10_TOTAL_GOLD, T10_TOTAL_VALOR, T10_REQUIREMENTS, T10_TREE_ROWS, tree_name_for_position, get_hq_advice
 
 load_dotenv()
 
@@ -1414,14 +1414,21 @@ async def analyze_special_forces_screenshots(screenshots: list[discord.Attachmen
         parts.append(types.Part.from_text(text=f"Screenshot {index} of {len(screenshots)}. Screenshots are ordered top-to-bottom and may overlap."))
         parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
 
-    prompt = """You are reading screenshots of the Special Forces technology tree from Last War: Survival.
+    tree_legend = "\n".join(
+        f"Row {index}: " + " | ".join(names)
+        for index, names in enumerate(T10_TREE_ROWS, start=1)
+    )
+    prompt = f"""You are reading screenshots of the Special Forces technology tree from Last War: Survival.
 Treat all supplied screenshots as overlapping sections of ONE continuous tree, ordered top to bottom.
-Your job is visual transcription, not game advice.
-Read every visible research node progress label such as MAX, 8/10, 5/10, 1/10. Reconcile duplicated nodes in overlaps.
-Do not invent research names from icons. Only provide a node name if readable text explicitly identifies it; otherwise use an empty string.
-Return JSON only: {"nodes":[{"order":1,"row":1,"column":"left|center|right|other","name":"","progress_text":"8/10","current_level":8,"max_level":10,"seen_in_screens":[1],"confidence":0.95}],"notes":[]}
-For MAX, use current_level=10 and max_level=10 unless the screenshot clearly shows another maximum.
-Number rows and order from top to bottom. If a value is unreadable, omit that node rather than guessing."""
+Your job is precise visual transcription. Read every visible node progress label such as MAX, 8/10, 5/10, 1/10 or 0/1 and reconcile duplicates in overlaps.
+
+The OOPZ-verified tree layout, top to bottom, is:
+{tree_legend}
+
+Use this fixed layout to assign row, column and node name. For three-node rows use left, center, right. For one-node rows use center. For two-node rows use left, right.
+Return JSON only: {{"nodes":[{{"order":1,"row":1,"column":"left|center|right|other","name":"HP Boost I","progress_text":"8/10","current_level":8,"max_level":10,"seen_in_screens":[1],"confidence":0.95}}],"notes":[]}}
+For MAX, use current_level=10 and max_level=10 unless the screenshot clearly shows another maximum. Unit X is 0/1 or 1/1.
+If a value is unreadable, omit that node rather than guessing. Do not fabricate a level."""
     parts.insert(0, types.Part.from_text(text=prompt))
 
     def run_gemini():
@@ -1470,7 +1477,10 @@ def summarize_special_forces_scan(scan: dict) -> tuple[str, str]:
                 complete_nodes += 1
         confidence = node.get("confidence")
         suffix = " ⚠️" if isinstance(confidence, (int, float)) and confidence < 0.8 else ""
-        lines.append(f"• Row {row} • {column}: **{progress}**{suffix}")
+        mapped_name = tree_name_for_position(int(row), str(node.get("column", "other"))) if str(row).isdigit() else ""
+        detected_name = str(node.get("name") or "").strip()
+        node_name = mapped_name or detected_name or f"Row {row} {column}"
+        lines.append(f"• **{node_name}** — {progress}{suffix}")
     if len(nodes) > 30:
         lines.append(f"• …and {len(nodes) - 30} more nodes")
     percent = round((earned / possible) * 100, 1) if possible else 0
@@ -1556,9 +1566,9 @@ async def t10(
         value=(
             f"Research levels 9–10: **HQ{T10_REQUIREMENTS['final_nodes']['hq']} + "
             f"Tech Center {T10_REQUIREMENTS['final_nodes']['tech_center']}**\n"
-            f"Unit X / T10: **HQ{T10_REQUIREMENTS['unit_x']['hq']} + "
-            f"Tech Center {T10_REQUIREMENTS['unit_x']['tech_center']} + "
-            f"Barracks {T10_REQUIREMENTS['unit_x']['barracks']}**"
+            f"Unit X research: **Tech Center {T10_REQUIREMENTS['unit_x_research']['tech_center']} + "
+            f"HP Boost III {T10_REQUIREMENTS['unit_x_research']['hp_boost_iii']}**\n"
+            f"Training T10 after unlock: **Barracks {T10_REQUIREMENTS['t10_training']['barracks']}**"
         ),
         inline=False,
     )
@@ -1603,7 +1613,11 @@ async def t10(
                     scan_text = scan_text[:1018] + "…"
                 embed.add_field(name="📊 Your scanned progress", value=progress_summary, inline=False)
                 embed.add_field(name="🧠 Detected research levels", value=scan_text, inline=False)
-                embed.add_field(name="🧮 Gold & Valor remaining", value="Pending exact node mapping — HR will not guess costs from icons.", inline=False)
+                embed.add_field(
+                    name="🗺️ Tree mapping",
+                    value="All 23 Special Forces nodes are mapped. HR matches the scanned row/position to the verified research name and will not invent unreadable levels.",
+                    inline=False,
+                )
                 notes = scan.get("notes") or []
                 if notes:
                     note_text = "\n".join(f"• {n}" for n in notes[:4])
