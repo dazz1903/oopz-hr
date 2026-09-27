@@ -24,7 +24,7 @@ load_dotenv()
 TOKEN = os.environ["DISCORD_TOKEN"]
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-3.8-flash").strip()
-GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
+GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.1-flash-lite").strip()
 GUILD_ID = int(os.environ["GUILD_ID"])
 ROSTER_CHANNEL_ID = int(os.environ["ROSTER_CHANNEL_ID"])
 LOG_CHANNEL_ID = int(os.environ["LOG_CHANNEL_ID"])
@@ -1437,16 +1437,17 @@ Number rows and order from top to bottom. If a value is unreadable, omit that no
             error_text = str(exc)
             if ("503" not in error_text and "UNAVAILABLE" not in error_text):
                 raise
-            # A 503 means temporary capacity pressure, not a bad request.
-            # Retry the known-valid primary model instead of guessing another model name.
-            logging.warning("Gemini model temporarily unavailable; retrying primary model once")
-            import time
-            time.sleep(2)
-            response = client.models.generate_content(
-                model=GEMINI_VISION_MODEL,
-                contents=parts,
-                config=config,
-            )
+            # A 503 means temporary capacity pressure. Use Google's documented
+            # free-tier Flash-Lite model for this simple screenshot transcription.
+            if GEMINI_FALLBACK_MODEL:
+                logging.warning("Gemini primary overloaded; trying fallback model %s", GEMINI_FALLBACK_MODEL)
+                response = client.models.generate_content(
+                    model=GEMINI_FALLBACK_MODEL,
+                    contents=parts,
+                    config=config,
+                )
+            else:
+                raise
         return json.loads(response.text)
 
     return await asyncio.to_thread(run_gemini)
