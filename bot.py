@@ -1533,7 +1533,7 @@ async def build_vip_pick(interaction: discord.Interaction, test_mode: bool = Fal
     if not grandfather_done:
         established = iso(now - timedelta(days=8))
         for name, info in roster.items():
-            uid = str(info.get("player_uid") or "").strip()
+            uid = str(info.get("uid") or "").strip()
             if uid:
                 await db_execute(
                     """INSERT OR REPLACE INTO vip_join_dates (player_uid, player_name, first_seen_at)
@@ -1547,7 +1547,7 @@ async def build_vip_pick(interaction: discord.Interaction, test_mode: bool = Fal
 
     # After grandfathering, genuinely new roster UIDs start their real 7-day wait.
     for name, info in roster.items():
-        uid = str(info.get("player_uid") or "").strip()
+        uid = str(info.get("uid") or "").strip()
         if uid:
             await db_execute(
                 """INSERT OR IGNORE INTO vip_join_dates (player_uid, player_name, first_seen_at)
@@ -1563,9 +1563,9 @@ async def build_vip_pick(interaction: discord.Interaction, test_mode: bool = Fal
     # It does not use join dates or the real VIP rotation at all.
     if test_mode:
         eligible = [
-            (str(info.get("player_uid") or "").strip(), name)
+            (str(info.get("uid") or "").strip(), name)
             for name, info in roster.items()
-            if str(info.get("player_uid") or "").strip()
+            if str(info.get("uid") or "").strip()
         ]
         if not eligible:
             await interaction.response.send_message(
@@ -1580,7 +1580,7 @@ async def build_vip_pick(interaction: discord.Interaction, test_mode: bool = Fal
         first_seen = {str(r["player_uid"]): parse_iso(r["first_seen_at"]) for r in seen}
         eligible = []
         for name, info in roster.items():
-            uid = str(info.get("player_uid") or "").strip()
+            uid = str(info.get("uid") or "").strip()
             if not uid:
                 continue
             joined = first_seen.get(uid)
