@@ -82,3 +82,20 @@ def hero_prompt_knowledge() -> str:
         "Do not discuss gear or Exclusive Weapons.",
     ]
     return "\n".join(lines)
+
+
+def hero_level_cap(hq_level: int) -> int:
+    """Last War hero level cap: HQ28=140, HQ29=145, HQ30=150."""
+    return max(5, min(150, hq_level * 5))
+
+
+def normalize_advice(value) -> list[str]:
+    """Gemini may return a string instead of a JSON array; never iterate it by character."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        value = value.strip()
+        return [value] if value else []
+    return [str(value).strip()]
