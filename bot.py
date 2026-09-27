@@ -1394,8 +1394,8 @@ def admin_only(interaction: discord.Interaction) -> bool:
 
 @bot.tree.command(name="t10", description="Get your personal OOPZ T10 / Special Forces roadmap")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
-async def t10(interaction: discord.Interaction):
-    """Give any roster-linked OOPZ member a T10 roadmap using their current HQ."""
+async def t10(interaction: discord.Interaction, screenshot: discord.Attachment | None = None):
+    """Give any roster-linked OOPZ member a T10 roadmap using their current HQ, with an optional Special Forces screenshot."""
     if not interaction.guild or not isinstance(interaction.user, discord.Member):
         await interaction.response.send_message("🚫 This command only works inside the OOPZ server.", ephemeral=True)
         return
@@ -1465,6 +1465,32 @@ async def t10(interaction: discord.Interaction):
         ),
         inline=False,
     )
+    if screenshot is not None:
+        content_type = (screenshot.content_type or "").lower()
+        filename = screenshot.filename.lower()
+        image_extensions = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+        if not (content_type.startswith("image/") or filename.endswith(image_extensions)):
+            await interaction.response.send_message(
+                "📸 Please attach an image of your **Special Forces** research screen (PNG, JPG, JPEG, WEBP or GIF).",
+                ephemeral=True,
+            )
+            return
+        embed.add_field(
+            name="📸 Special Forces screenshot received",
+            value=(
+                f"I received **{screenshot.filename}**. The upload pipeline is working. "
+                "Next we will add image analysis so I can read your research levels and calculate what you still need."
+            ),
+            inline=False,
+        )
+        embed.set_image(url=screenshot.url)
+    else:
+        embed.add_field(
+            name="📸 Want a more exact plan?",
+            value="Run **/t10** again and attach a screenshot of your Special Forces tree in the **screenshot** field.",
+            inline=False,
+        )
+
     embed.set_footer(text="OOPZ Growth Department • based on your latest roster HQ")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
