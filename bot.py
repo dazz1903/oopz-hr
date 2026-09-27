@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from t10_coach import T10_RESEARCH, T10_TOTAL_GOLD, T10_TOTAL_VALOR, T10_REQUIREMENTS, T10_TREE_ROWS, tree_name_for_position, get_hq_advice, get_t10_next_moves
-from hero_coach import hero_prompt_knowledge
+from hero_coach import hero_prompt_knowledge, hero_level_cap, normalize_advice
 
 load_dotenv()
 
@@ -1654,7 +1654,7 @@ async def t10(
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-async def analyze_squad_screenshots(screenshots: list[discord.Attachment]) -> dict:
+async def analyze_squad_screenshots(screenshots: list[discord.Attachment], hq_level: int) -> dict:
     """Analyze Last War squad screenshots and return coaching JSON."""
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY is not configured")
@@ -1665,7 +1665,7 @@ Use the verified OOPZ knowledge below:
 """ + knowledge + """
 Only identify a hero when confident from portrait/UI. Never invent an identity.
 Use visible unit type, role, level and stars where readable.
-Focus on composition, front/back placement, next star investment, and Universal UR shard use.
+Focus on composition, front/back placement, next star investment, and Universal UR shard use.\nIMPORTANT: Follow the verified star_priority order. Do not invent a different priority because a defender is lower-star. For Air, DVA is the first 5-star priority once all five are at least 3-star.\nNever recommend "maintain current hero level" when heroes are merely at the current HQ cap; instead say the hero levels are capped until the next HQ, and only if that is useful.\nNever tell the player to focus Tavern pulls on a specific hero; Tavern pulls are random. Say Tavern-farmable heroes should generally use Tavern/personal shards rather than Universal UR shards.
 Do not dump the full hero inventory. Do not discuss gear or Exclusive Weapons.
 Return JSON only with keys: squad_type, power, heroes, coaching, formation, shard_advice, notes.
 heroes is a list of objects with name, stars, level, position, confidence.
@@ -1699,6 +1699,17 @@ async def squad(interaction: discord.Interaction, screenshot_1: discord.Attachme
     if not interaction.guild or not isinstance(interaction.user, discord.Member):
         await interaction.response.send_message("🚫 This command only works inside the OOPZ server.", ephemeral=True)
         return
+    roster = await get_roster()
+    row = await db_fetchone("SELECT * FROM members WHERE discord_id = ?", (interaction.user.id,))
+    identity = await resolve_roster_identity(interaction.user, roster, row) if roster else None
+    if not identity:
+        await interaction.response.send_message("🕵️ I can't connect you to the current OOPZ roster. Ask Queen/R4 to use /link_member, then try again.", ephemeral=True)
+        return
+    game_name, info = identity
+    hq = info.get("level")
+    if hq is None:
+        await interaction.response.send_message("🧮 Your HQ level is missing from the current roster.", ephemeral=True)
+        return
     screenshots = [s for s in (screenshot_1, screenshot_2) if s is not None]
     for screenshot in screenshots:
         if not ((screenshot.content_type or "").lower().startswith("image/") or screenshot.filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))):
@@ -1709,10 +1720,10 @@ async def squad(interaction: discord.Interaction, screenshot_1: discord.Attachme
         return
     await interaction.response.defer(ephemeral=True, thinking=True)
     try:
-        result = await analyze_squad_screenshots(screenshots)
+        result = await analyze_squad_screenshots(screenshots, hq)
         squad_type = str(result.get("squad_type") or "unknown").title()
         power = str(result.get("power") or "").strip()
-        heading = squad_type + (f" • {power}" if power else "")
+        heading = f"{game_name} • HQ{hq} • {squad_type}" + (f" • {power}" if power else "")
         embed = discord.Embed(title="⚔️ HR Squad Coach", description=heading, timestamp=now_utc())
         coaching = [str(x).strip() for x in result.get("coaching") or [] if str(x).strip()]
         formation = [str(x).strip() for x in result.get("formation") or [] if str(x).strip()]
