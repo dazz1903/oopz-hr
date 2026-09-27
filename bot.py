@@ -1613,12 +1613,14 @@ async def build_vip_pick(interaction: discord.Interaction, test_mode: bool = Fal
         "SELECT discord_id FROM members WHERE last_verified_uid = ?",
         (uid,),
     )
+    # Always show the in-game roster name. If Discord is linked, add the mention
+    # separately so Discord can notify them without replacing the visible game name.
     winner_display = f"**{winner}**"
     allowed_mentions = discord.AllowedMentions.none()
     if linked_row:
         discord_member = interaction.guild.get_member(int(linked_row["discord_id"]))
         if discord_member:
-            winner_display = discord_member.mention
+            winner_display = f"**{winner}** ({discord_member.mention})"
             allowed_mentions = discord.AllowedMentions(users=True)
 
     title = "🧪 OOPZ TRAIN VIP — TEST" if test_mode else "🏆✨ OOPZ TRAIN VIP ✨🏆"
