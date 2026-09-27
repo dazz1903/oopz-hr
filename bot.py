@@ -1532,46 +1532,10 @@ async def t10(
         )
         return
 
-    research_lines = [
-        f"• **{item['name']}** — {item['gold_total'] / 1_000_000_000:.2f}B Gold • {item['valor_total']:,} Valor"
-        for item in T10_RESEARCH.values()
-    ]
-
-    if hq < 27:
-        milestone = "**First milestone:** HQ27 → unlock T9. Keep building your Gold and Valor stockpile while you push HQ."
-    elif hq < 30:
-        milestone = (
-            f"**Current milestone:** HQ{hq} → HQ30. Keep advancing Special Forces now; "
-            "the final two research rows (levels 9–10) require **HQ30 + Tech Center 30**."
-        )
-    else:
-        milestone = (
-            "**HQ30 reached.** Finish **Tech Center 30** for the final research rows. "
-            "**Unit X / T10 also requires Barracks 30**."
-        )
-
     embed = discord.Embed(
         title="🔥 OOPZ T10 Coach",
-        description=f"**{game_name} • HQ{hq}**\n\n{get_hq_advice(hq)}",
+        description=f"**{game_name} • HQ{hq}**",
         timestamp=now_utc(),
-    )
-    embed.add_field(name="🎯 Your next milestone", value=milestone, inline=False)
-    embed.add_field(name="🧪 Full T10 research path", value="\n".join(research_lines), inline=False)
-    embed.add_field(
-        name="💰 Full path cost",
-        value=f"**Gold:** {T10_TOTAL_GOLD / 1_000_000_000:.2f}B\n**Valor Badges:** {T10_TOTAL_VALOR:,}",
-        inline=False,
-    )
-    embed.add_field(
-        name="🔒 Final requirements",
-        value=(
-            f"Research levels 9–10: **HQ{T10_REQUIREMENTS['final_nodes']['hq']} + "
-            f"Tech Center {T10_REQUIREMENTS['final_nodes']['tech_center']}**\n"
-            f"Unit X research: **Tech Center {T10_REQUIREMENTS['unit_x_research']['tech_center']} + "
-            f"HP Boost III {T10_REQUIREMENTS['unit_x_research']['hp_boost_iii']}**\n"
-            f"Training T10 after unlock: **Barracks {T10_REQUIREMENTS['t10_training']['barracks']}**"
-        ),
-        inline=False,
     )
     screenshots = [s for s in (screenshot_1, screenshot_2, screenshot_3, screenshot_4) if s is not None]
     if screenshots:
@@ -1586,16 +1550,6 @@ async def t10(
                 )
                 return
 
-        filenames = "\n".join(f"• {s.filename}" for s in screenshots)
-        embed.add_field(
-            name=f"📸 {len(screenshots)} Special Forces screenshot{'s' if len(screenshots) != 1 else ''} received",
-            value=(
-                f"{filenames}\n\n"
-                "I will treat these as **overlapping sections of one continuous Special Forces tree**. "
-                "The upload pipeline is ready for the image-analysis step."
-            ),
-            inline=False,
-        )
         # Discord embeds can preview one image; Gemini receives every supplied image.
         embed.set_image(url=screenshots[0].url)
 
@@ -1609,22 +1563,41 @@ async def t10(
             await interaction.response.defer(ephemeral=True, thinking=True)
             try:
                 scan = await analyze_special_forces_screenshots(screenshots)
-                scan_text, progress_summary = summarize_special_forces_scan(scan)
-                if len(scan_text) > 1024:
-                    scan_text = scan_text[:1018] + "…"
+                _, progress_summary = summarize_special_forces_scan(scan)
+                nodes = scan.get("nodes") or []
+                earned = possible = 0
+                for node in nodes:
+                    current = node.get("current_level")
+                    maximum = node.get("max_level")
+                    if isinstance(current, int) and isinstance(maximum, int) and maximum > 0:
+                        earned += max(0, min(current, maximum))
+                        possible += maximum
+                percent = round((earned / possible) * 100, 1) if possible else 0
+                remaining_fraction = max(0.0, 1.0 - (earned / possible)) if possible else 1.0
+
+                # We do not have every node's complete per-level cost table yet.
+                # These are deliberately marked as rough estimates rather than pretending
+                # that research cost scales evenly with level progress.
+                est_gold = T10_TOTAL_GOLD * remaining_fraction
+                est_valor = round(T10_TOTAL_VALOR * remaining_fraction)
                 next_moves = get_t10_next_moves(scan, hq)
-                if next_moves:
-                    coaching_text = "\n".join(f"**{i}.** {move}" for i, move in enumerate(next_moves, start=1))
-                    embed.add_field(name="🎯 HR's T10 coaching", value=coaching_text[:1024], inline=False)
+                focus = next_moves[0] if next_moves else "Keep progressing the direct path toward HP Boost III Lv.10 and Unit X."
+
                 embed.add_field(
-                    name="📊 Progress snapshot",
-                    value=progress_summary,
+                    name="📊 Your T10 progress",
+                    value=f"**You have done {percent}% of the T10 research tree.**",
                     inline=False,
                 )
-                notes = scan.get("notes") or []
-                if notes:
-                    note_text = "\n".join(f"• {n}" for n in notes[:4])
-                    embed.add_field(name="🔎 Scan notes", value=note_text[:1024], inline=False)
+                embed.add_field(
+                    name="💰 Still needed",
+                    value=(
+                        f"**About {est_gold / 1_000_000_000:.2f}B Gold**\n"
+                        f"**About {est_valor:,} Valor Badges**\n"
+                        "*(rough estimate until HR has every per-level cost mapped)*"
+                    ),
+                    inline=False,
+                )
+                embed.add_field(name="🎯 Focus first", value=f"**{focus}**", inline=False)
             except Exception as exc:
                 logging.exception("Gemini Special Forces screenshot analysis failed")
                 error_text = str(exc).replace(GEMINI_API_KEY, "[redacted]") if GEMINI_API_KEY else str(exc)
