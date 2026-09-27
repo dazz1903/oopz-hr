@@ -1575,11 +1575,15 @@ async def t10(
                 if notes:
                     note_text = "\n".join(f"• {n}" for n in notes[:4])
                     embed.add_field(name="🔎 Scan notes", value=note_text[:1024], inline=False)
-            except Exception:
+            except Exception as exc:
                 logging.exception("Gemini Special Forces screenshot analysis failed")
+                error_text = str(exc).replace(GEMINI_API_KEY, "[redacted]") if GEMINI_API_KEY else str(exc)
                 embed.add_field(
                     name="⚠️ Screenshot analysis failed",
-                    value="I received the screenshots, but the vision scan failed. Please try again or tell Queen/R4.",
+                    value=(
+                        "I received the screenshots, but the vision scan failed.\n"
+                        f"**Diagnostic:** `{error_text[:700]}`"
+                    ),
                     inline=False,
                 )
             embed.set_footer(text="OOPZ Growth Department • based on your latest roster HQ")
