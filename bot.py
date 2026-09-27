@@ -1394,8 +1394,14 @@ def admin_only(interaction: discord.Interaction) -> bool:
 
 @bot.tree.command(name="t10", description="Get your personal OOPZ T10 / Special Forces roadmap")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
-async def t10(interaction: discord.Interaction, screenshot: discord.Attachment | None = None):
-    """Give any roster-linked OOPZ member a T10 roadmap using their current HQ, with an optional Special Forces screenshot."""
+async def t10(
+    interaction: discord.Interaction,
+    screenshot_1: discord.Attachment | None = None,
+    screenshot_2: discord.Attachment | None = None,
+    screenshot_3: discord.Attachment | None = None,
+    screenshot_4: discord.Attachment | None = None,
+):
+    """Give a T10 roadmap and accept up to four overlapping Special Forces screenshots."""
     if not interaction.guild or not isinstance(interaction.user, discord.Member):
         await interaction.response.send_message("🚫 This command only works inside the OOPZ server.", ephemeral=True)
         return
@@ -1465,29 +1471,40 @@ async def t10(interaction: discord.Interaction, screenshot: discord.Attachment |
         ),
         inline=False,
     )
-    if screenshot is not None:
-        content_type = (screenshot.content_type or "").lower()
-        filename = screenshot.filename.lower()
+    screenshots = [s for s in (screenshot_1, screenshot_2, screenshot_3, screenshot_4) if s is not None]
+    if screenshots:
         image_extensions = (".png", ".jpg", ".jpeg", ".webp", ".gif")
-        if not (content_type.startswith("image/") or filename.endswith(image_extensions)):
-            await interaction.response.send_message(
-                "📸 Please attach an image of your **Special Forces** research screen (PNG, JPG, JPEG, WEBP or GIF).",
-                ephemeral=True,
-            )
-            return
+        for screenshot in screenshots:
+            content_type = (screenshot.content_type or "").lower()
+            filename = screenshot.filename.lower()
+            if not (content_type.startswith("image/") or filename.endswith(image_extensions)):
+                await interaction.response.send_message(
+                    f"📸 **{screenshot.filename}** is not an image. Please use PNG, JPG, JPEG, WEBP or GIF.",
+                    ephemeral=True,
+                )
+                return
+
+        filenames = "\n".join(f"• {s.filename}" for s in screenshots)
         embed.add_field(
-            name="📸 Special Forces screenshot received",
+            name=f"📸 {len(screenshots)} Special Forces screenshot{'s' if len(screenshots) != 1 else ''} received",
             value=(
-                f"I received **{screenshot.filename}**. The upload pipeline is working. "
-                "Next we will add image analysis so I can read your research levels and calculate what you still need."
+                f"{filenames}\n\n"
+                "I will treat these as **overlapping sections of one continuous Special Forces tree**. "
+                "The upload pipeline is ready for the image-analysis step."
             ),
             inline=False,
         )
-        embed.set_image(url=screenshot.url)
+        # Discord embeds can preview one image; all supplied attachment URLs are
+        # still available to the analyzer.
+        embed.set_image(url=screenshots[0].url)
     else:
         embed.add_field(
             name="📸 Want a more exact plan?",
-            value="Run **/t10** again and attach a screenshot of your Special Forces tree in the **screenshot** field.",
+            value=(
+                "Run **/t10** again and attach your Special Forces tree using "
+                "**screenshot_1** through **screenshot_4**. Use overlapping screenshots "
+                "from top to bottom so I can reconstruct the full tree."
+            ),
             inline=False,
         )
 
