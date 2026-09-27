@@ -17,7 +17,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-from t10_coach import T10_RESEARCH, T10_TOTAL_GOLD, T10_TOTAL_VALOR, T10_REQUIREMENTS, T10_TREE_ROWS, tree_name_for_position, get_hq_advice
+from t10_coach import T10_RESEARCH, T10_TOTAL_GOLD, T10_TOTAL_VALOR, T10_REQUIREMENTS, T10_TREE_ROWS, tree_name_for_position, get_hq_advice, get_t10_next_moves
 
 load_dotenv()
 
@@ -1613,6 +1613,10 @@ async def t10(
                     scan_text = scan_text[:1018] + "…"
                 embed.add_field(name="📊 Your scanned progress", value=progress_summary, inline=False)
                 embed.add_field(name="🧠 Detected research levels", value=scan_text, inline=False)
+                next_moves = get_t10_next_moves(scan, hq)
+                if next_moves:
+                    coaching_text = "\n".join(f"{i}. {move}" for i, move in enumerate(next_moves, start=1))
+                    embed.add_field(name="🎯 Your next T10 moves", value=coaching_text[:1024], inline=False)
                 embed.add_field(
                     name="🗺️ Tree mapping",
                     value="All 23 Special Forces nodes are mapped. HR matches the scanned row/position to the verified research name and will not invent unreadable levels.",
