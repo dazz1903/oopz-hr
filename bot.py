@@ -1529,7 +1529,7 @@ async def build_vip_pick(interaction: discord.Interaction, test_mode: bool = Fal
     # One-time hard grandfather: everyone who is on the roster when this version first
     # runs is considered an established member. The marker prevents future joiners from
     # being grandfathered accidentally.
-    grandfather_done = await db_fetchone("SELECT value FROM meta WHERE key = 'vip_grandfather_v2'")
+    grandfather_done = await db_fetchone("SELECT value FROM meta WHERE key = 'vip_grandfather_v3'")
     if not grandfather_done:
         established = iso(now - timedelta(days=8))
         for name, info in roster.items():
@@ -1541,7 +1541,7 @@ async def build_vip_pick(interaction: discord.Interaction, test_mode: bool = Fal
                     (uid, name, established),
                 )
         await db_execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES ('vip_grandfather_v2', ?)",
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('vip_grandfather_v3', ?)",
             (iso(now),),
         )
 
@@ -1567,7 +1567,9 @@ async def build_vip_pick(interaction: discord.Interaction, test_mode: bool = Fal
         if not uid:
             continue
         joined = first_seen.get(uid)
-        if joined and now - joined >= timedelta(days=7):
+        # Test mode deliberately ignores the 7-day tenure gate so R4/R5 can always
+        # verify the picker. Real /vip still enforces the newcomer rule.
+        if test_mode or (joined and now - joined >= timedelta(days=7)):
             eligible.append((uid, name))
 
     if not eligible:
