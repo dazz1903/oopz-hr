@@ -1582,23 +1582,42 @@ async def vip(interaction: discord.Interaction):
     )
 
     left_after = len(remaining) - 1
+
+    # Tag the winner when their PlayerUID is linked to a current Discord member.
+    linked_row = await db_fetchone(
+        "SELECT discord_id FROM members WHERE last_verified_uid = ?",
+        (uid,),
+    )
+    winner_display = f"**{winner}**"
+    allowed_mentions = discord.AllowedMentions.none()
+    if linked_row:
+        discord_member = interaction.guild.get_member(int(linked_row["discord_id"]))
+        if discord_member:
+            winner_display = discord_member.mention
+            allowed_mentions = discord.AllowedMentions(users=True)
+
     embed = discord.Embed(
-        title="🚂 OOPZ Train VIP",
-        description=f"🎟️ **Today's VIP is: {winner}**",
+        title="🏆✨ OOPZ TRAIN VIP ✨🏆",
+        description=(
+            "The train has chosen its VIP! 🚂💨\n\n"
+            f"🎟️ **Congratulations {winner_display}!**\n"
+            "You’ve earned the **VIP seat** for this train. 👑\n\n"
+            "Enjoy the ride — today the fancy seat is yours. 😎"
+        ),
         timestamp=now,
     )
     embed.add_field(
-        name="Fair rotation",
+        name="🎲 Fair VIP Rotation",
         value=(
-            f"Random pick • **{left_after}** eligible member{'s' if left_after != 1 else ''} "
-            "still need a turn before the pool resets."
+            f"**{left_after}** eligible member{'s' if left_after != 1 else ''} "
+            "still need a turn before everyone goes back into the draw."
         ),
         inline=False,
     )
-    embed.set_footer(text="New OOPZ members become eligible after 7 days.")
+    embed.set_footer(text="Everyone gets a turn • New members join the draw after 7 days")
 
     view = VIPRerollView(uid, winner, interaction.user.id)
-    await interaction.response.send_message(embed=embed, view=view)
+    await interaction.response.send_message(embed=embed, view=view, allowed_mentions=allowed_mentions)
 
 
 class VIPRerollView(discord.ui.View):
