@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from t10_coach import T10_RESEARCH, T10_TOTAL_GOLD, T10_TOTAL_VALOR, T10_REQUIREMENTS, T10_TREE_ROWS, tree_name_for_position, get_hq_advice, get_t10_next_moves
+from hero_coach import hero_prompt_knowledge
 
 load_dotenv()
 
@@ -1652,6 +1653,84 @@ async def t10(
     embed.set_footer(text="OOPZ Growth Department • based on your latest roster HQ")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+
+async def analyze_squad_screenshots(screenshots: list[discord.Attachment]) -> dict:
+    """Analyze Last War squad screenshots and return coaching JSON."""
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY is not configured")
+    knowledge = hero_prompt_knowledge()
+    prompt = """You are HR Squad Coach for OOPZ in Last War: Survival.
+Analyze the supplied squad/hero screenshots and give concise progression coaching.
+Use the verified OOPZ knowledge below:
+""" + knowledge + """
+Only identify a hero when confident from portrait/UI. Never invent an identity.
+Use visible unit type, role, level and stars where readable.
+Focus on composition, front/back placement, next star investment, and Universal UR shard use.
+Do not dump the full hero inventory. Do not discuss gear or Exclusive Weapons.
+Return JSON only with keys: squad_type, power, heroes, coaching, formation, shard_advice, notes.
+heroes is a list of objects with name, stars, level, position, confidence.
+Keep coaching to at most 4 actions, formation to at most 2 lines, shard_advice to at most 2 lines."""
+    parts = [types.Part.from_text(text=prompt)]
+    for index, screenshot in enumerate(screenshots, start=1):
+        image_bytes = await screenshot.read()
+        mime_type = (screenshot.content_type or "image/png").split(";", 1)[0]
+        if mime_type == "image/jpg":
+            mime_type = "image/jpeg"
+        parts.append(types.Part.from_text(text=f"Screenshot {index} of {len(screenshots)}."))
+        parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
+    def run_gemini():
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        config = types.GenerateContentConfig(response_mime_type="application/json", temperature=0)
+        try:
+            response = client.models.generate_content(model=GEMINI_VISION_MODEL, contents=parts, config=config)
+        except Exception as exc:
+            if "503" not in str(exc) and "UNAVAILABLE" not in str(exc):
+                raise
+            if not GEMINI_FALLBACK_MODEL:
+                raise
+            response = client.models.generate_content(model=GEMINI_FALLBACK_MODEL, contents=parts, config=config)
+        return json.loads(response.text)
+    return await asyncio.to_thread(run_gemini)
+
+
+@bot.tree.command(name="squad", description="Get personalized OOPZ hero and main-squad coaching")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def squad(interaction: discord.Interaction, screenshot_1: discord.Attachment, screenshot_2: discord.Attachment | None = None):
+    if not interaction.guild or not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("🚫 This command only works inside the OOPZ server.", ephemeral=True)
+        return
+    screenshots = [s for s in (screenshot_1, screenshot_2) if s is not None]
+    for screenshot in screenshots:
+        if not ((screenshot.content_type or "").lower().startswith("image/") or screenshot.filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))):
+            await interaction.response.send_message("📸 Please upload a PNG, JPG, JPEG or WEBP screenshot.", ephemeral=True)
+            return
+    if not GEMINI_API_KEY:
+        await interaction.response.send_message("🧠 Squad Coach vision is not configured.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        result = await analyze_squad_screenshots(screenshots)
+        squad_type = str(result.get("squad_type") or "unknown").title()
+        power = str(result.get("power") or "").strip()
+        heading = squad_type + (f" • {power}" if power else "")
+        embed = discord.Embed(title="⚔️ HR Squad Coach", description=heading, timestamp=now_utc())
+        coaching = [str(x).strip() for x in result.get("coaching") or [] if str(x).strip()]
+        formation = [str(x).strip() for x in result.get("formation") or [] if str(x).strip()]
+        shards = [str(x).strip() for x in result.get("shard_advice") or [] if str(x).strip()]
+        if coaching:
+            embed.add_field(name="🎯 Focus now", value="\n".join(f"**{i}.** {x}" for i, x in enumerate(coaching[:4], 1))[:1024], inline=False)
+        if formation:
+            embed.add_field(name="🛡️ Formation", value="\n".join(f"• {x}" for x in formation[:2])[:1024], inline=False)
+        if shards:
+            embed.add_field(name="💎 Universal shard advice", value="\n".join(f"• {x}" for x in shards[:2])[:1024], inline=False)
+        if not coaching and not formation and not shards:
+            embed.add_field(name="⚠️ Scan result", value="I could not read enough confidently. Try a clearer full squad screenshot.", inline=False)
+        embed.set_image(url=screenshots[0].url)
+        embed.set_footer(text="OOPZ Growth Department • gear & Exclusive Weapons intentionally excluded")
+        await interaction.edit_original_response(embed=embed)
+    except Exception as exc:
+        logging.exception("Squad screenshot analysis failed")
+        await interaction.edit_original_response(content=f"⚠️ Squad Coach could not analyze that screenshot: `{str(exc)[:700]}`")
 
 @bot.tree.command(name="roster_status", description="Show current OOPZ roster bot status")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
