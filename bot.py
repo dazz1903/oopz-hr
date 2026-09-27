@@ -760,28 +760,41 @@ async def find_expected_name(row, roster: dict[str, dict]) -> Optional[str]:
 
 
 async def resolve_roster_identity(member: discord.Member, roster: dict[str, dict], row=None) -> Optional[tuple[str, dict]]:
-    """Resolve a Discord member to one LWMA roster identity safely."""
-    visible = member_name(member)
-    if visible in roster:
-        return visible, roster[visible]
+    """Resolve a Discord member to one LWMA identity.
 
-    # Relaxed first-time matching: ignore cosmetic Discord decoration and allow
-    # a very small typo distance, but never guess between ambiguous candidates.
-    game_name = relaxed_roster_name_match(visible, roster)
-    if game_name:
-        return game_name, roster[game_name]
-
+    PlayerUID is authoritative once a Discord account has ever been linked to a
+    UID. A rename must never break that link, and a missing linked UID must
+    never be silently reassigned by nickname matching.
+    """
     if row is None:
         row = await db_fetchone(
             "SELECT last_verified_name, last_verified_uid, ever_verified FROM members WHERE discord_id = ?",
             (member.id,),
         )
+
+    # Existing UID links always win over names. If that UID disappeared from
+    # the current roster, return no identity: sync_guild will classify the
+    # member as departed and remove them immediately.
     if row:
         uid = row["last_verified_uid"] if "last_verified_uid" in row.keys() else None
         if uid:
             entry = roster_by_uid(roster).get(uid)
             if entry:
                 return entry
+            return None
+
+    # Name/fuzzy matching is ONLY for Discord users who do not yet have a
+    # durable UID link (new members / legacy migration).
+    visible = member_name(member)
+    if visible in roster:
+        return visible, roster[visible]
+
+    game_name = relaxed_roster_name_match(visible, roster)
+    if game_name:
+        return game_name, roster[game_name]
+
+    # Legacy pre-UID records may still have a previously verified name.
+    if row:
         old_name = row["last_verified_name"] if "last_verified_name" in row.keys() else None
         if old_name:
             game_name = relaxed_roster_name_match(old_name, roster)
