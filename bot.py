@@ -5,6 +5,7 @@ import io
 import logging
 import os
 import re
+import secrets
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -183,6 +184,18 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS meta (
                 key TEXT PRIMARY KEY,
                 value TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS vip_turns (
+                player_uid TEXT PRIMARY KEY,
+                player_name TEXT NOT NULL,
+                last_picked_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS vip_join_dates (
+                player_uid TEXT PRIMARY KEY,
+                player_name TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL
             );
             """
         )
@@ -1492,6 +1505,87 @@ def summarize_special_forces_scan(scan: dict) -> tuple[str, str]:
         f"**Fully completed nodes:** {complete_nodes}/{len(nodes)}"
     )
     return "\n".join(lines), summary
+
+
+@bot.tree.command(name="vip", description="Randomly pick the next fair OOPZ train VIP")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def vip(interaction: discord.Interaction):
+    """Pick one eligible roster member; everyone gets a turn before repeats."""
+    if not interaction.guild or not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("🚫 This command only works inside the OOPZ server.", ephemeral=True)
+        return
+
+    roster = await get_roster()
+    if not roster:
+        await interaction.response.send_message("📭 No OOPZ roster is loaded yet.", ephemeral=True)
+        return
+
+    # Record first-seen dates for roster UIDs. This makes the 7-day newcomer rule persistent.
+    now = now_utc()
+    for name, info in roster.items():
+        uid = str(info.get("player_uid") or "").strip()
+        if uid:
+            await db_execute(
+                """INSERT OR IGNORE INTO vip_join_dates (player_uid, player_name, first_seen_at)
+                   VALUES (?, ?, ?)""",
+                (uid, name, iso(now)),
+            )
+            await db_execute(
+                "UPDATE vip_join_dates SET player_name = ? WHERE player_uid = ?",
+                (name, uid),
+            )
+
+    seen = await db_fetchall("SELECT player_uid, first_seen_at FROM vip_join_dates")
+    first_seen = {str(r["player_uid"]): parse_iso(r["first_seen_at"]) for r in seen}
+
+    eligible = []
+    for name, info in roster.items():
+        uid = str(info.get("player_uid") or "").strip()
+        if not uid:
+            continue
+        joined = first_seen.get(uid)
+        if joined and now - joined >= timedelta(days=7):
+            eligible.append((uid, name))
+
+    if not eligible:
+        await interaction.response.send_message(
+            "🚂 Nobody is VIP-eligible yet. New members must be in OOPZ for 7 days first.",
+            ephemeral=True,
+        )
+        return
+
+    picked_rows = await db_fetchall("SELECT player_uid FROM vip_turns")
+    already_picked = {str(r["player_uid"]) for r in picked_rows}
+    remaining = [(uid, name) for uid, name in eligible if uid not in already_picked]
+
+    # A completed round resets automatically. Members who left the roster do not block it.
+    if not remaining:
+        await db_execute("DELETE FROM vip_turns")
+        remaining = eligible
+
+    uid, winner = secrets.choice(remaining)
+    await db_execute(
+        """INSERT OR REPLACE INTO vip_turns (player_uid, player_name, last_picked_at)
+           VALUES (?, ?, ?)""",
+        (uid, winner, iso(now)),
+    )
+
+    left_after = len(remaining) - 1
+    embed = discord.Embed(
+        title="🚂 OOPZ Train VIP",
+        description=f"🎟️ **Today's VIP is: {winner}**",
+        timestamp=now,
+    )
+    embed.add_field(
+        name="Fair rotation",
+        value=(
+            f"Random pick • **{left_after}** eligible member{'s' if left_after != 1 else ''} "
+            "still need a turn before the pool resets."
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="New OOPZ members become eligible after 7 days.")
+    await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="t10", description="Get your personal OOPZ T10 / Special Forces roadmap")
