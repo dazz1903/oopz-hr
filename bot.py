@@ -1521,18 +1521,31 @@ async def vip(interaction: discord.Interaction):
         return
 
     now = now_utc()
+    vip_seen_count_row = await db_fetchone("SELECT COUNT(*) AS count FROM vip_join_dates")
+    grandfather_current_roster = not vip_seen_count_row or int(vip_seen_count_row["count"]) == 0
+    initial_seen_at = now - timedelta(days=8) if grandfather_current_roster else now
     for name, info in roster.items():
         uid = str(info.get("player_uid") or "").strip()
         if uid:
             await db_execute(
                 """INSERT OR IGNORE INTO vip_join_dates (player_uid, player_name, first_seen_at)
                    VALUES (?, ?, ?)""",
-                (uid, name, iso(now)),
+                (uid, name, iso(initial_seen_at)),
             )
             await db_execute(
                 "UPDATE vip_join_dates SET player_name = ? WHERE player_uid = ?",
                 (name, uid),
             )
+
+    # Migration for the first live test: the previous version stamped the whole existing
+    # roster as "new today". If no VIP has ever been picked, grandfather that initial cohort.
+    picked_count_row = await db_fetchone("SELECT COUNT(*) AS count FROM vip_turns")
+    if not picked_count_row or int(picked_count_row["count"]) == 0:
+        cutoff = now - timedelta(days=7)
+        await db_execute(
+            "UPDATE vip_join_dates SET first_seen_at = ? WHERE first_seen_at > ?",
+            (iso(now - timedelta(days=8)), iso(cutoff)),
+        )
 
     seen = await db_fetchall("SELECT player_uid, first_seen_at FROM vip_join_dates")
     first_seen = {str(r["player_uid"]): parse_iso(r["first_seen_at"]) for r in seen}
