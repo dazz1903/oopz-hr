@@ -1,4 +1,6 @@
 import csv
+import asyncio
+import json
 import io
 import logging
 import os
@@ -13,11 +15,15 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
+from google import genai
+from google.genai import types
 from t10_coach import T10_RESEARCH, T10_TOTAL_GOLD, T10_TOTAL_VALOR, T10_REQUIREMENTS, get_hq_advice
 
 load_dotenv()
 
 TOKEN = os.environ["DISCORD_TOKEN"]
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-flash").strip()
 GUILD_ID = int(os.environ["GUILD_ID"])
 ROSTER_CHANNEL_ID = int(os.environ["ROSTER_CHANNEL_ID"])
 LOG_CHANNEL_ID = int(os.environ["LOG_CHANNEL_ID"])
@@ -1392,6 +1398,60 @@ def admin_only(interaction: discord.Interaction) -> bool:
     return bool(interaction.user.guild_permissions.manage_guild)
 
 
+
+async def analyze_special_forces_screenshots(screenshots: list[discord.Attachment]) -> dict:
+    """Read overlapping Special Forces screenshots with Gemini and return merged progress JSON."""
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY is not configured")
+
+    parts = []
+    for index, screenshot in enumerate(screenshots, start=1):
+        image_bytes = await screenshot.read()
+        mime_type = (screenshot.content_type or "image/png").split(";", 1)[0]
+        if mime_type == "image/jpg":
+            mime_type = "image/jpeg"
+        parts.append(types.Part.from_text(text=f"Screenshot {index} of {len(screenshots)}. Screenshots are ordered top-to-bottom and may overlap."))
+        parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
+
+    prompt = """You are reading screenshots of the Special Forces technology tree from Last War: Survival.
+Treat all supplied screenshots as overlapping sections of ONE continuous tree, ordered top to bottom.
+Your job is visual transcription, not game advice.
+Read every visible research node progress label such as MAX, 8/10, 5/10, 1/10. Reconcile duplicated nodes in overlaps.
+Do not invent research names from icons. Only provide a node name if readable text explicitly identifies it; otherwise use an empty string.
+Return JSON only: {"nodes":[{"order":1,"row":1,"column":"left|center|right|other","name":"","progress_text":"8/10","current_level":8,"max_level":10,"seen_in_screens":[1],"confidence":0.95}],"notes":[]}
+For MAX, use current_level=10 and max_level=10 unless the screenshot clearly shows another maximum.
+Number rows and order from top to bottom. If a value is unreadable, omit that node rather than guessing."""
+    parts.insert(0, types.Part.from_text(text=prompt))
+
+    def run_gemini():
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        response = client.models.generate_content(
+            model=GEMINI_VISION_MODEL,
+            contents=parts,
+            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0),
+        )
+        return json.loads(response.text)
+
+    return await asyncio.to_thread(run_gemini)
+
+
+def format_special_forces_scan(scan: dict) -> str:
+    nodes = scan.get("nodes") or []
+    if not nodes:
+        return "I couldn't confidently read any research levels from these screenshots."
+    lines = []
+    for node in nodes[:30]:
+        row = node.get("row", "?")
+        column = str(node.get("column", "other")).title()
+        progress = str(node.get("progress_text", "?"))
+        confidence = node.get("confidence")
+        suffix = " ⚠️" if isinstance(confidence, (int, float)) and confidence < 0.8 else ""
+        lines.append(f"• Row {row} • {column}: **{progress}**{suffix}")
+    if len(nodes) > 30:
+        lines.append(f"• …and {len(nodes) - 30} more nodes")
+    return "\n".join(lines)
+
+
 @bot.tree.command(name="t10", description="Get your personal OOPZ T10 / Special Forces roadmap")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def t10(
@@ -1494,9 +1554,37 @@ async def t10(
             ),
             inline=False,
         )
-        # Discord embeds can preview one image; all supplied attachment URLs are
-        # still available to the analyzer.
+        # Discord embeds can preview one image; Gemini receives every supplied image.
         embed.set_image(url=screenshots[0].url)
+
+        if not GEMINI_API_KEY:
+            embed.add_field(
+                name="🧠 Screenshot reader not connected yet",
+                value="Add **GEMINI_API_KEY** to Railway Variables, then run `/t10` again.",
+                inline=False,
+            )
+        else:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            try:
+                scan = await analyze_special_forces_screenshots(screenshots)
+                scan_text = format_special_forces_scan(scan)
+                if len(scan_text) > 1024:
+                    scan_text = scan_text[:1018] + "…"
+                embed.add_field(name="🧠 Special Forces scan", value=scan_text, inline=False)
+                notes = scan.get("notes") or []
+                if notes:
+                    note_text = "\n".join(f"• {n}" for n in notes[:4])
+                    embed.add_field(name="🔎 Scan notes", value=note_text[:1024], inline=False)
+            except Exception:
+                logging.exception("Gemini Special Forces screenshot analysis failed")
+                embed.add_field(
+                    name="⚠️ Screenshot analysis failed",
+                    value="I received the screenshots, but the vision scan failed. Please try again or tell Queen/R4.",
+                    inline=False,
+                )
+            embed.set_footer(text="OOPZ Growth Department • based on your latest roster HQ")
+            await interaction.edit_original_response(embed=embed)
+            return
     else:
         embed.add_field(
             name="📸 Want a more exact plan?",
