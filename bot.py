@@ -2111,6 +2111,45 @@ async def link_member(interaction: discord.Interaction, member: discord.Member, 
     await log_action(f"🔗 **Manual identity link** — {member.mention} → `{resolved_name}` by {interaction.user.mention}")
 
 
+@bot.tree.command(name="unlink_member", description="Unlink a Discord member from their current LWMA player")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def unlink_member(interaction: discord.Interaction, member: discord.Member):
+    if not admin_only(interaction):
+        await interaction.response.send_message("🚫 HR says no. You need **Manage Server** permission for that command.", ephemeral=True)
+        return
+
+    row = await db_fetchone(
+        "SELECT last_verified_name, last_verified_uid FROM members WHERE discord_id = ?",
+        (member.id,),
+    )
+    if not row or (not row["last_verified_uid"] and not row["last_verified_name"]):
+        await interaction.response.send_message(f"ℹ️ {member.mention} doesn't currently have a verified roster link.", ephemeral=True)
+        return
+
+    old_name = row["last_verified_name"] or "unknown player"
+    old_uid = row["last_verified_uid"]
+    await db_execute(
+        """UPDATE members
+           SET last_verified_name = NULL,
+               last_verified_uid = NULL,
+               ever_verified = 0,
+               warning_started_at = NULL,
+               updated_at = ?
+           WHERE discord_id = ?""",
+        (iso(), member.id),
+    )
+    if old_uid:
+        await db_execute("DELETE FROM vip_join_dates WHERE player_uid = ?", (str(old_uid),))
+
+    await interaction.response.send_message(
+        f"🔓 Unlinked {member.mention} from **{old_name}**. They can now be linked to the correct roster player with /link_member.",
+        ephemeral=True,
+    )
+    await log_action(
+        f"🔓 **Manual identity unlink** — {member.mention} removed from {old_name} by {interaction.user.mention}"
+    )
+
+
 @bot.tree.command(name="celebrate_hq", description="Manually celebrate a missed HQ upgrade in the achievements channel")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def celebrate_hq(interaction: discord.Interaction, member: discord.Member, old_hq: int, new_hq: int):
