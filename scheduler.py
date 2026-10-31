@@ -12,6 +12,7 @@ import aiosqlite
 import discord
 from discord import app_commands
 from discord.ext import tasks
+from vs_calendar import ARMS, add_daily_vs, arms_embed
 
 log = logging.getLogger('oopz-scheduler')
 # Explicitly supplied by the alliance: midnight server = 03:00 German winter time.
@@ -19,6 +20,8 @@ SERVER_TIME = timezone(timedelta(hours=-2), name='Server time (UTC-02:00)')
 DAILY_CHANNEL = 1524785999845130321
 ANNOUNCEMENTS_CHANNEL = 1524785541059448966
 LEADERSHIP_ROLES = {1548703462332694618, 1548703579055857774}
+R4_ROLE = 1548703579055857774
+R4_CHANNEL = 1524482625824231505
 TRIAL_ANCHOR = date(2026, 11, 4)
 KINDS = {
     'marshall': 'Marshall Guard', 'zombie': 'Zombie Siege',
@@ -62,6 +65,7 @@ class Event:
     level: int | None = None
     server: int | None = None
     request_id: int | None = None
+    category: str = 'operation'
 
     @property
     def start(self):
@@ -90,6 +94,10 @@ def fixed_events(day: date, start: date | None) -> list[Event]:
         events.append(Event(f'fixed:all-day:{day}', name + ' (Wednesday–Friday)', day))
     if n and n >= 8 and day.weekday() in (1, 4):
         events.append(Event(f'fixed:crimson:{day}', 'Crimson Legion Attack', day, time(12)))
+    if day.weekday() in ARMS:
+        phase, slots, _ = ARMS[day.weekday()]
+        for clock in slots:
+            events.append(Event(f'arms:{day}:{clock:%H:%M}', 'Arms Race · ' + phase, day, clock, category='arms'))
     return events
 
 
@@ -107,13 +115,13 @@ def request_events(row, start: date | None) -> list[Event]:
                   day, clock, row['level'], row['server'], row['id']) for label, clock in slots]
 
 
-def agenda_embed(day: date, events: list[Event], start: date | None):
+def agenda_embed(day: date, events: list[Event], start: date | None, vs_mode=None):
     n = season_day(day, start)
     label = f'Season 1 · Week {(n - 1) // 7 + 1} · Day {n}' if n else 'Out of season'
     embed = discord.Embed(title='📋 OOPZ DAILY ORDERS', color=0xE6B84B,
                           description=f'**{day:%A, %d %B %Y}**\n{label}\n🕒 All times are server time.')
     for title, subset in [('ALL DAY', [e for e in events if e.clock is None]),
-                          ("TODAY’S OPERATIONS", [e for e in events if e.clock is not None])]:
+                          ("TODAY’S OPERATIONS", [e for e in events if e.clock is not None and e.category != 'arms'])]:
         if subset:
             lines = [e.line() for e in subset]
             chunks, current = [], ''
@@ -130,7 +138,7 @@ def agenda_embed(day: date, events: list[Event], start: date | None):
     if any(e.server for e in events):
         embed.add_field(name='LEADERSHIP ORDERS', value='🚫 Do not jump early. Wait for R4/R5 to give target and movement instructions.', inline=False)
     embed.set_footer(text='Schedule changes after this post appear through /event list. Event starts are posted in #announcements.')
-    return embed
+    return add_daily_vs(embed, day, vs_mode)
 
 
 def start_embed(event: Event):
@@ -192,6 +200,9 @@ class Scheduler:
                     message_id TEXT, error TEXT);
                 CREATE TABLE IF NOT EXISTS schedule_audit (
                     id INTEGER PRIMARY KEY, actor TEXT, action TEXT, detail TEXT, at TEXT);
+                CREATE TABLE IF NOT EXISTS schedule_vs_weeks (
+                    week_start TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('save','push')),
+                    updated_by TEXT NOT NULL, updated_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS schedule_plan (
                     id INTEGER PRIMARY KEY, fingerprint TEXT NOT NULL, entry_no INTEGER NOT NULL,
                     season_day INTEGER NOT NULL, kind TEXT NOT NULL, level INTEGER NOT NULL,
@@ -206,6 +217,21 @@ class Scheduler:
     async def season(self):
         rows = await self.rows("SELECT value FROM schedule_settings WHERE key='season_start'")
         return parse_date(rows[0]['value']) if rows and rows[0]['value'] else None
+
+    async def vs_mode(self, day):
+        monday = day - timedelta(days=day.weekday())
+        rows = await self.rows('SELECT mode FROM schedule_vs_weeks WHERE week_start=?', (str(monday),))
+        return rows[0]['mode'] if rows else None
+
+    async def set_vs_mode(self, monday, mode, actor):
+        if mode not in ('save', 'push') or monday.weekday() != 0:
+            raise ValueError('Choose Push or Save and a valid week.')
+        async with self.lock, aiosqlite.connect(self.database) as db:
+            stamp = datetime.now(timezone.utc).isoformat()
+            await db.execute('INSERT OR REPLACE INTO schedule_vs_weeks VALUES (?,?,?,?)', (str(monday), mode, str(actor), stamp))
+            await db.execute('INSERT INTO schedule_audit(actor,action,detail,at) VALUES (?,?,?,?)',
+                             (str(actor), 'VS mode', f'{monday}:{mode}', stamp))
+            await db.commit()
 
     async def set_season(self, start, actor):
         async with self.lock, aiosqlite.connect(self.database) as db:
@@ -290,13 +316,17 @@ class Scheduler:
                              (str(actor), 'cancel event', str(request_id), datetime.now(timezone.utc).isoformat()))
             await db.commit()
 
-    async def deliver(self, key, channel_id, embed, ping=False):
+    async def deliver(self, key, channel_id, embed, ping=False, r4_ping=False):
         channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
         if getattr(getattr(channel, 'guild', None), 'id', None) != self.guild_id:
             raise RuntimeError('Schedule destination is not in the configured guild.')
         permissions = channel.permissions_for(channel.guild.me)
         if not permissions.send_messages or not permissions.embed_links or (ping and not permissions.mention_everyone):
             raise RuntimeError('Missing Send Messages / Embed Links / Mention Everyone permissions.')
+        if r4_ping:
+            role = channel.guild.get_role(R4_ROLE)
+            if role is None or not (permissions.mention_everyone or role.mentionable):
+                raise RuntimeError('Cannot notify R4: role must be mentionable or bot needs Mention Everyone in the R4 channel.')
         # Claim before sending: uncertain sends are never replayed after restart.
         # This favors avoiding duplicate @everyone notifications over late catch-up.
         async with aiosqlite.connect(self.database) as db:
@@ -306,8 +336,9 @@ class Scheduler:
             if not cur.rowcount:
                 return
         try:
-            message = await channel.send(content='@everyone' if ping else None, embed=embed,
-                allowed_mentions=discord.AllowedMentions(everyone=ping, users=False, roles=False, replied_user=False))
+            message = await channel.send(content='@everyone' if ping else (f'<@&{R4_ROLE}>' if r4_ping else None), embed=embed,
+                allowed_mentions=discord.AllowedMentions(everyone=ping, users=False,
+                    roles=[discord.Object(id=R4_ROLE)] if r4_ping else False, replied_user=False))
         except Exception:
             log.exception('Schedule delivery %s failed; left claimed to prevent a duplicate notification', key)
             return
@@ -321,15 +352,29 @@ class Scheduler:
         day = now.date()
         events = await self.events(day)
         start = await self.season()
+        mode = await self.vs_mode(day)
         if now.time().replace(tzinfo=None) < time(0, 15):
             try:
-                await self.deliver(f'agenda:{day}', DAILY_CHANNEL, agenda_embed(day, events, start))
+                await self.deliver(f'agenda:{day}', DAILY_CHANNEL, agenda_embed(day, events, start, mode))
             except Exception:
                 log.exception('Cannot deliver daily agenda for %s', day)
+            if day.weekday() == 6:
+                next_monday = day + timedelta(days=1)
+                if await self.vs_mode(next_monday) is None:
+                    reminder = discord.Embed(title='R4 — SET NEXT WEEK’S VS MODE',
+                        description=f'Week starting **{next_monday}** is **UNKNOWN**.\n'
+                        'Type `/vs week`, choose **Push** or **Save**, then confirm.\n'
+                        'Minimum: 3.6 million per player per scoring day. Save week maximum: 7.2 million.\n'
+                        'HR will not carry last week’s mode forward.', color=0xE6B84B)
+                    try:
+                        await self.deliver(f'vs-nudge:{next_monday}', R4_CHANNEL, reminder, r4_ping=True)
+                    except Exception:
+                        log.exception('Cannot deliver Sunday VS reminder')
         for event in events:
             if event.clock and timedelta(0) <= now - event.start < timedelta(minutes=10):
                 try:
-                    await self.deliver(event.key, ANNOUNCEMENTS_CHANNEL, start_embed(event), ping=True)
+                    embed = arms_embed(day, event.clock, mode) if event.category == 'arms' else start_embed(event)
+                    await self.deliver(event.key, ANNOUNCEMENTS_CHANNEL, embed, ping=True)
                 except Exception:
                     log.exception('Cannot deliver scheduled event %s', event.key)
 
@@ -347,7 +392,7 @@ class Scheduler:
     async def start(self):
         await self.init()
         if not self.worker.is_running():
-            for channel_id, ping in ((DAILY_CHANNEL, False), (ANNOUNCEMENTS_CHANNEL, True)):
+            for channel_id, ping in ((DAILY_CHANNEL, False), (ANNOUNCEMENTS_CHANNEL, True), (R4_CHANNEL, False)):
                 try:
                     channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
                     permissions = channel.permissions_for(channel.guild.me)
@@ -355,10 +400,17 @@ class Scheduler:
                              and permissions.send_messages and permissions.embed_links
                              and (not ping or permissions.mention_everyone))
                     log.info('Scheduler channel %s ready=%s everyone=%s', channel_id, ready, ping)
+                    if channel_id == R4_CHANNEL:
+                        r4 = channel.guild.get_role(R4_ROLE)
+                        log.info('Sunday R4 notifications ready=%s', bool(r4 and (permissions.mention_everyone or r4.mentionable)))
                 except Exception:
                     log.exception('Scheduler cannot check channel %s', channel_id)
             self.worker.start()
             log.info('Scheduler active: server UTC-02:00, daily orders 00:00, R4/R5 controls enabled')
+            log.info('VS active: daily minimum 3.6M; Save cap 7.2M; weekly mode defaults Unknown; Sunday R4 nudge enabled')
+            today = datetime.now(SERVER_TIME).date()
+            next_monday = today + timedelta(days=7-today.weekday())
+            log.info('VS week modes: current=%s next=%s', await self.vs_mode(today) or 'Unknown', await self.vs_mode(next_monday) or 'Unknown')
 
 
 def install(bot, database, guild_id):
@@ -367,6 +419,7 @@ def install(bot, database, guild_id):
     events = app_commands.Group(name='event', description='OOPZ event schedule — server time')
     seasons = app_commands.Group(name='season', description='Set the eight-week OOPZ season')
     plans = app_commands.Group(name='plan', description='Private LWMA capture planning for R4/R5')
+    vs = app_commands.Group(name='vs', description='Set this week’s VS orders: Push or Save')
 
     async def leader(interaction):
         if interaction.guild_id != guild_id or not ({r.id for r in getattr(interaction.user, 'roles', [])} & LEADERSHIP_ROLES):
@@ -376,6 +429,53 @@ def install(bot, database, guild_id):
 
     async def error(interaction, exc):
         await interaction.followup.send(str(exc), ephemeral=True)
+
+    @vs.command(name='week', description='Choose Push or Save; on Sunday defaults to the coming Monday')
+    @app_commands.choices(mode=[app_commands.Choice(name='Save — 3.6M minimum / 7.2M maximum', value='save'),
+                               app_commands.Choice(name='Push — 3.6M minimum / score maximum', value='push')])
+    async def vs_week(interaction: discord.Interaction, mode: str, date: str | None = None):
+        if not await leader(interaction): return
+        try:
+            if mode not in ('save', 'push'): raise ValueError('Choose Push or Save.')
+            day = parse_date(date) if date else datetime.now(SERVER_TIME).date()
+            if date is None and day.weekday() == 6:
+                day += timedelta(days=1)
+            monday = day - timedelta(days=day.weekday())
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        async def save():
+            await scheduler.set_vs_mode(monday, mode, interaction.user.id)
+            return f'VS {mode.upper()} saved for {monday} through {monday + timedelta(days=5)}. Following weeks remain Unknown until set. Already-posted daily orders remain a snapshot.'
+        from vs_calendar import target_text
+        await interaction.response.send_message(f'**Week: {monday} through {monday + timedelta(days=5)}**\n'
+            + target_text(mode, monday) + '\nThis applies to this week only. Confirm to save.',
+            ephemeral=True, view=Confirm(interaction.user.id, save))
+
+    @vs.command(name='status', description='Check current and next week’s VS mode')
+    async def vs_status(interaction: discord.Interaction):
+        if not await leader(interaction): return
+        today = datetime.now(SERVER_TIME).date()
+        monday = today - timedelta(days=today.weekday())
+        next_monday = monday + timedelta(days=7)
+        current = await scheduler.vs_mode(today)
+        following = await scheduler.vs_mode(next_monday)
+        await interaction.response.send_message(f'**This week ({monday}): {(current or "Unknown").upper()}**\n'
+            f'**Next week ({next_monday}): {(following or "Unknown").upper()}**\n'
+            'Minimum on every VS scoring day: 3.6M per player. Save week ceiling: 7.2M.\n'
+            'Sunday at 00:00 server time, HR nudges R4 in the R4 channel if the coming week is still Unknown.', ephemeral=True)
+
+    @vs.command(name='preview', description='Privately preview daily VS orders and Arms Race times')
+    async def vs_preview(interaction: discord.Interaction, date: str | None = None):
+        if not await leader(interaction): return
+        try:
+            day = parse_date(date) if date else datetime.now(SERVER_TIME).date()
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        embed = discord.Embed(title=f'OOPZ VS — {day:%A, %d %B %Y}', color=0x9B59B6)
+        add_daily_vs(embed, day, await scheduler.vs_mode(day))
+        await interaction.response.send_message(embed=embed, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
     @seasons.command(name='start', description='Preview and set Season 1 start date (YYYY-MM-DD); lasts 56 days')
     async def season_start(interaction: discord.Interaction, date: str):
@@ -488,7 +588,7 @@ def install(bot, database, guild_id):
         except ValueError as exc:
             await interaction.response.send_message(str(exc), ephemeral=True)
             return
-        await interaction.response.send_message(embed=agenda_embed(day, await scheduler.events(day), await scheduler.season()),
+        await interaction.response.send_message(embed=agenda_embed(day, await scheduler.events(day), await scheduler.season(), await scheduler.vs_mode(day)),
                                                 ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
     @events.command(name='status', description='Check scheduler clock, channels, permissions and delivery health')
@@ -579,7 +679,7 @@ def install(bot, database, guild_id):
         await interaction.response.send_message(f'**Capture preview — {day}**\n{slots[0].line()}\nNo coordinates will be posted.',
                                                 ephemeral=True, view=Confirm(interaction.user.id, save))
 
-    for group in (events, seasons, plans):
+    for group in (events, seasons, plans, vs):
         bot.tree.add_command(group, guild=guild)
 
     @bot.tree.command(name='schedule', description='Show today’s OOPZ events in server time', guild=guild)
@@ -588,7 +688,7 @@ def install(bot, database, guild_id):
             await interaction.response.send_message('Use this command in the OOPZ server.', ephemeral=True)
             return
         day = datetime.now(SERVER_TIME).date()
-        await interaction.response.send_message(embed=agenda_embed(day, await scheduler.events(day), await scheduler.season()),
+        await interaction.response.send_message(embed=agenda_embed(day, await scheduler.events(day), await scheduler.season(), await scheduler.vs_mode(day)),
                                                 ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
     return scheduler
 
