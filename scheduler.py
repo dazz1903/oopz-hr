@@ -347,6 +347,16 @@ class Scheduler:
     async def start(self):
         await self.init()
         if not self.worker.is_running():
+            for channel_id, ping in ((DAILY_CHANNEL, False), (ANNOUNCEMENTS_CHANNEL, True)):
+                try:
+                    channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
+                    permissions = channel.permissions_for(channel.guild.me)
+                    ready = (channel.guild.id == self.guild_id and permissions.view_channel
+                             and permissions.send_messages and permissions.embed_links
+                             and (not ping or permissions.mention_everyone))
+                    log.info('Scheduler channel %s ready=%s everyone=%s', channel_id, ready, ping)
+                except Exception:
+                    log.exception('Scheduler cannot check channel %s', channel_id)
             self.worker.start()
             log.info('Scheduler active: server UTC-02:00, daily orders 00:00, R4/R5 controls enabled')
 
