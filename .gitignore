@@ -1,0 +1,25 @@
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+credentials.json
+*service-account*.json
+*.pem
+*.key
+
+# Live bot data, backups, and roster exports
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.csv
+*.log
+backups/
+
+# Python local files
+__pycache__/
+*.py[cod]
+.venv/
+venv/
