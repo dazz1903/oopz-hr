@@ -84,3 +84,45 @@ notifications in their own settings. If a published daily agenda is followed by
 schedule changes, the original agenda remains a snapshot; `/schedule` and
 `/event list` show the current version.
 
+## VS and Arms Race
+
+Daily orders now include that day's Season-1 VS tasks and the alliance's point
+target. Minimum: **3.6 million per player per VS scoring day**. In Save weeks,
+the maximum is **7.2 million per player per day**. Push weeks have no alliance
+ceiling. Sunday is preparation rather than a VS scoring stage.
+
+Each week starts **Unknown**; no automatic Push/Save alternation is inferred.
+At 00:00 server time on Sunday, HR sends one reminder in the R4 channel
+(1524482625824231505), mentioning
+the R4 role if the following week is still Unknown. No @everyone is used for this
+leadership reminder. R4 must be mentionable or the bot must have Mention Everyone
+permission in the R4 channel for that role notification to work.
+
+- `/vs week mode:Save` or `/vs week mode:Push`: preview, then confirm. On Sunday,
+  this sets the coming Monday; Monday–Saturday it sets the current week.
+- Optional `date:YYYY-MM-DD` selects the week containing that date.
+- `/vs status`: privately checks this week and next week's modes.
+- `/vs preview`: privately shows today's VS instructions; optional date supported.
+- Choosing or changing the mode does not send an immediate public message or edit
+  an already-posted agenda. Later event alerts read the latest saved mode.
+
+Leadership-supplied recurring Arms Race alerts, sent with @everyone in #announcements:
+
+| Day | Server time | Phase |
+|---|---|---|
+| Monday | 16:00 | Drone Boost |
+| Tuesday | 08:00, 20:00 | Base Building |
+| Wednesday | 08:00, 20:00 | Tech Research |
+| Thursday | 08:00, 20:00 | Hero Advancement |
+| Friday | 08:00, 20:00 | Unit Progression |
+| Saturday | 12:00 | Use stamina for Arms Race |
+
+Only these supplied windows are scheduled, not a guessed full rotation.
+Matching actions are named explicitly: Thursday's shared actions, for example,
+are hero recruitment and hero XP. Saturday stamina is presented separately from
+Saturday VS scoring; it is not advertised as earning both types of points.
+
+Task references (alliance rules and server times override generic advice):
+- https://www.lastwargame.online/en/game-alliance-duel/
+- https://www.lastwargame.online/en/arms-race-complete-guide/
+
