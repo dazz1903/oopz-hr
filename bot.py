@@ -101,6 +101,9 @@ intents.members = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+from scheduler import install as install_scheduler
+event_scheduler = install_scheduler(bot, DATABASE_PATH, GUILD_ID)
+
 
 @dataclass
 class SyncStats:
@@ -1252,6 +1255,7 @@ async def send_change_report(diff: RosterDiff, roster: dict[str, dict]):
 @bot.event
 async def on_ready():
     await init_db()
+    await event_scheduler.init()
     guild = bot.get_guild(GUILD_ID)
     if not guild:
         log.error("Configured GUILD_ID is not available to the bot")
@@ -1261,6 +1265,7 @@ async def on_ready():
         await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
     except discord.HTTPException:
         log.exception("Slash command sync failed")
+    await event_scheduler.start()
     if not grace_period_check.is_running():
         grace_period_check.change_interval(minutes=GRACE_CHECK_MINUTES)
         grace_period_check.start()
