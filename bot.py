@@ -103,6 +103,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 from scheduler import install as install_scheduler
 event_scheduler = install_scheduler(bot, DATABASE_PATH, GUILD_ID)
+from languages import install as install_languages
+language_service = install_languages(bot, DATABASE_PATH, GUILD_ID)
 
 
 @dataclass
@@ -1256,6 +1258,7 @@ async def send_change_report(diff: RosterDiff, roster: dict[str, dict]):
 async def on_ready():
     await init_db()
     await event_scheduler.init()
+    await language_service.start()
     guild = bot.get_guild(GUILD_ID)
     if not guild:
         log.error("Configured GUILD_ID is not available to the bot")
