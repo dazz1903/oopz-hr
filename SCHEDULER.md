@@ -45,6 +45,10 @@ creator to press **Confirm and save** within three minutes.
 - `/event preview date:YYYY-MM-DD` privately previews the daily announcement.
 - `/event status` checks destination permissions, the live clock, and uncertain
   deliveries. It does not publish anything.
+- `/event test` previews a full sample run, then sends explicitly labelled TEST
+  messages to daily-orders, announcements and r4-chat on confirmation. Everyone,
+  role and user mentions are disabled. Samples use fictional 2030 dates and do
+  not modify schedules, season settings, VS modes or member data.
 - `/schedule` is available to all OOPZ members as a private view of today's agenda.
 
 ## LWMA capture plans
