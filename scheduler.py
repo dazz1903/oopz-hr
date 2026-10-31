@@ -347,6 +347,85 @@ class Scheduler:
             await db.commit()
         log.info('Schedule delivery sent: %s', key)
 
+    async def send_test_suite(self, run_id):
+        """Send samples, never scheduling events or changing season/VS/roster state."""
+        sample_start = date(2030, 1, 7)  # Monday; explicitly fictitious test season.
+        batches = {DAILY_CHANNEL: [], ANNOUNCEMENTS_CHANNEL: [], R4_CHANNEL: []}
+        for offset in range(7):
+            day = sample_start + timedelta(days=offset)
+            mode = ('push', 'save', None)[offset % 3]
+            batches[DAILY_CHANNEL].append(agenda_embed(day, fixed_events(day, sample_start), sample_start, mode))
+        # Include the alternating all-day event, not just one side of the cycle.
+        trial_day = date(2030, 1, 9)
+        other_day = trial_day + timedelta(days=7)
+        batches[DAILY_CHANNEL].append(agenda_embed(other_day, fixed_events(other_day, sample_start), sample_start, 'save'))
+        count = await self.rows('SELECT COUNT(*) AS n FROM roster')
+        linked = await self.rows('SELECT COUNT(*) AS n FROM members WHERE ever_verified=1')
+        roster = discord.Embed(title='ROSTER / VERIFICATION STATUS', color=0x3498DB,
+            description=f"Read-only check of the live database: **{count[0]['n']} roster players**, **{linked[0]['n']} verified Discord links**.\n"
+            'No members, nicknames, roles, warnings or roster entries were changed by this test.')
+        batches[DAILY_CHANNEL].append(roster)
+        samples = [
+            ('Marshall Guard', time(11), 9, None), ('Zombie Siege', time(14), 5, None),
+            ('Desert Storm · Team A', time(9,30), None, None), ('Desert Storm · Team B', time(18,30), None, None),
+            ('Stronghold Capture', time(17), 4, 2294), ('City Capture', time(18), 3, 2294),
+            ('Warzone Duel', time(12), None, None), ('Infinite Octagon', time(12), None, None),
+            ('Crimson Legion Attack', time(12), None, None), ('Sky Battlefront', time(12), None, None),
+            ('Meteorite War', time(0,10), None, None), ('Meteorite War', time(12), None, None),
+        ]
+        for number, (title, clock, level, server) in enumerate(samples):
+            batches[ANNOUNCEMENTS_CHANNEL].append(start_embed(Event(f'sample:{number}',title,sample_start,clock,level,server)))
+        for offset in range(6):
+            day = sample_start + timedelta(days=offset)
+            for clock in ARMS[offset][1]:
+                batches[ANNOUNCEMENTS_CHANNEL].append(arms_embed(day, clock, 'save' if offset % 2 else 'push'))
+        batches[R4_CHANNEL].append(discord.Embed(title='SUNDAY — SET NEXT WEEK’S VS MODE', color=0xE6B84B,
+            description='**Sample R4-only nudge:** next week is UNKNOWN.\n'
+            'Type `/vs week`, choose Push or Save and confirm.\n'
+            'The real reminder mentions R4 here; this test does not mention anyone.'))
+        actual_season = await self.season()
+        batches[R4_CHANNEL].append(discord.Embed(title='SEASON & LWMA PLAN CONTROLS', color=0xE6B84B,
+            description=f'Actual season start: **{actual_season or "Not set"}**.\n'
+            'The 2030 dates in these samples are fictional and were not saved.\n'
+            'Use `/season start` when the real date is known; `/plan import` creates private capture drafts, '
+            'then `/plan schedule` adds a server and time. Coordinates are never announced.\n'
+            'This test did not import, schedule, cancel or change anything.'))
+        sent = 0
+        for channel_id, embeds in batches.items():
+            channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
+            if channel.guild.id != self.guild_id:
+                raise RuntimeError('Test destination is not in the configured guild.')
+            permissions = channel.permissions_for(channel.guild.me)
+            if not permissions.view_channel or not permissions.send_messages or not permissions.embed_links:
+                raise RuntimeError(f'Cannot send test samples in channel {channel_id}.')
+            groups, group = [], []
+            for embed in embeds:
+                embed.title = '🧪 TEST — ' + embed.title
+                embed.description = '**TEST ONLY — no action required. Sample data, not real orders.**\n\n' + (embed.description or '')
+                embed.set_footer(text='TEST · No notifications/pings · No schedule changes · 2030 dates are fictional')
+                if group and (len(group) >= 5 or sum(len(e) for e in group) + len(embed) > 5500):
+                    groups.append(group)
+                    group = []
+                group.append(embed)
+            if group:
+                groups.append(group)
+            for number, group in enumerate(groups):
+                key = f'test:{run_id}:{channel_id}:{number}'
+                async with aiosqlite.connect(self.database) as db:
+                    cur = await db.execute('INSERT OR IGNORE INTO schedule_deliveries(key,status,claimed_at) VALUES (?,?,?)',
+                        (key, 'claimed', datetime.now(timezone.utc).isoformat()))
+                    await db.commit()
+                    if not cur.rowcount:
+                        continue
+                message = await channel.send(content='🧪 **TEST MESSAGES — no action required. All mentions are disabled.**',
+                    embeds=group, allowed_mentions=discord.AllowedMentions.none())
+                async with aiosqlite.connect(self.database) as db:
+                    await db.execute("UPDATE schedule_deliveries SET status='sent',message_id=? WHERE key=?", (str(message.id),key))
+                    await db.commit()
+                sent += 1
+        log.info('TEST suite completed: %s, %s messages, all mentions disabled; schedules unchanged',run_id,sent)
+        return sent
+
     async def tick(self, now=None):
         now = now or datetime.now(SERVER_TIME)
         day = now.date()
@@ -429,6 +508,21 @@ def install(bot, database, guild_id):
 
     async def error(interaction, exc):
         await interaction.followup.send(str(exc), ephemeral=True)
+
+    @events.command(name='test', description='Send clearly labelled samples to the three configured channels; no pings')
+    async def event_test(interaction: discord.Interaction):
+        if not await leader(interaction): return
+        async def send():
+            try:
+                total = await scheduler.send_test_suite(str(interaction.id))
+            except Exception:
+                log.exception('TEST suite failed; inspect channels before retrying')
+                return 'Some test messages could not be sent. Check the three channels and bot logs before retrying; real schedules are unchanged.'
+            return f'🧪 Sent {total} labelled test messages across daily-orders, announcements and r4-chat. All mentions disabled; real schedules and member data unchanged.'
+        await interaction.response.send_message('Send a full set of **TEST** samples to daily-orders, announcements and r4-chat?\n'
+            'Includes daily agendas, VS Push/Save/Unknown, all event templates, Arms Race phases, roster status and the Sunday R4 nudge.\n'
+            '**No @everyone or role pings. No real schedules or member data will change.**',
+            ephemeral=True, view=Confirm(interaction.user.id, send))
 
     @vs.command(name='week', description='Choose Push or Save; on Sunday defaults to the coming Monday')
     @app_commands.choices(mode=[app_commands.Choice(name='Save — 3.6M minimum / 7.2M maximum', value='save'),
