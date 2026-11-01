@@ -57,3 +57,15 @@ alongside the roster. Buttons are re-registered after a restart. Re-running setu
 edits the existing message rather than posting another. Reports contain aggregate
 counts and role IDs, without member names or member IDs.
 
+## English defaults and owner notifications
+
+Existing and new human members receive English unless they already saved another
+language. Choosing another language replaces their language role and sends the
+server owner a private message with the member, language and assigned role ID.
+Choosing the same language again does not repeat the message. Bot accounts are
+excluded. Failed DMs are recorded in `/language report`; there is no public fallback.
+
+English, Portuguese and French roles are prepared automatically. On first rollout,
+the owner receives a private list of current choices and role IDs for manual setup.
+No translation links or channel permissions are configured by this feature.
+
