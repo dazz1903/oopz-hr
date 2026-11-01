@@ -229,6 +229,9 @@ class Languages:
                 CREATE TABLE IF NOT EXISTS language_roles(code TEXT PRIMARY KEY,role_id TEXT UNIQUE NOT NULL);
                 CREATE TABLE IF NOT EXISTS language_preferences(member_id TEXT PRIMARY KEY,code TEXT NOT NULL,updated_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS language_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS language_notifications(
+                    id INTEGER PRIMARY KEY,member_id TEXT NOT NULL,code TEXT NOT NULL,role_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending');
             ''')
 
     async def rows(self,query,values=()):
@@ -257,10 +260,14 @@ class Languages:
             await db.commit()
         return role
 
-    async def select(self,member,code):
+    async def select(self,member,code,*,notify=True,default=False):
         if member.guild.id!=self.guild_id or member.bot or code not in LANGUAGES:
             raise ValueError('Invalid language selection.')
         async with self.lock:
+            previous=await self.rows('SELECT code FROM language_preferences WHERE member_id=?',(str(member.id),))
+            previous_code=previous[0]['code'] if previous else None
+            if default and previous_code:
+                code=previous_code
             role=await self.get_role(member.guild,code)
             known={int(row['role_id']) for row in await self.rows('SELECT role_id FROM language_roles')}
             old=[r for r in member.roles if r.id in known and r.id!=role.id]
@@ -275,10 +282,79 @@ class Languages:
                     await member.remove_roles(role,reason='Restore previous language after failed change')
                 raise
             async with aiosqlite.connect(self.database) as db:
+                stamp=datetime.now(timezone.utc).isoformat()
                 await db.execute('INSERT OR REPLACE INTO language_preferences VALUES (?,?,?)',
-                    (str(member.id),code,datetime.now(timezone.utc).isoformat()))
+                    (str(member.id),code,stamp))
+                note_id=None
+                if notify and not default and code!='EN' and code!=previous_code:
+                    cur=await db.execute('INSERT INTO language_notifications(member_id,code,role_id,created_at) VALUES (?,?,?,?)',
+                        (str(member.id),code,str(role.id),stamp))
+                    note_id=cur.lastrowid
                 await db.commit()
             log.info('Language choice saved: %s',code)
+        if note_id:
+            await self.notify_owner(member,code,role,note_id)
+
+    async def notify_owner(self,member,code,role,note_id):
+        # Only the server owner receives this notification. No public fallback.
+        async with aiosqlite.connect(self.database) as db:
+            cur=await db.execute("UPDATE language_notifications SET status='sending' WHERE id=? AND status='pending'",(note_id,))
+            await db.commit()
+            if not cur.rowcount:return
+        try:
+            owner=self.bot.get_user(member.guild.owner_id) or await self.bot.fetch_user(member.guild.owner_id)
+            embed=discord.Embed(title='🌐 MEMBER CHOSE A LANGUAGE',color=0x3498DB,
+                description=f'**{discord.utils.escape_markdown(member.display_name)}** chose **{LANGUAGES[code]}** '
+                    f'({NATIVE.get(code,LANGUAGES[code])}).\n\n'
+                    f'**Assigned role:** {role.name}\n**Role ID:** `{role.id}`\n\n'
+                    'If this language is not ready yet, set up its channels and iTranslator links manually. '
+                    'HR has not changed channel permissions or translation settings.')
+            embed.set_footer(text=f'Member ID: {member.id} · Language: {code}')
+            await owner.send(embed=embed,allowed_mentions=discord.AllowedMentions.none())
+            status='sent'
+            log.info('Owner language notification sent: %s',code)
+        except Exception as exc:
+            status='failed'
+            log.warning('Owner language DM failed (%s); recorded for /language report',type(exc).__name__)
+        async with aiosqlite.connect(self.database) as db:
+            await db.execute('UPDATE language_notifications SET status=? WHERE id=?',(status,note_id))
+            await db.commit()
+
+    async def assign_defaults(self,guild):
+        try:
+            if not guild.chunked:
+                await guild.chunk(cache=True)
+            # Prepare the three requested roles without granting channel access.
+            async with self.lock:
+                for code in ('EN','PT','FR'):
+                    await self.get_role(guild,code)
+            done,failed=0,0
+            for member in list(guild.members):
+                if member.bot:continue
+                try:
+                    await self.select(member,'EN',notify=False,default=True)
+                    done+=1
+                except (ValueError,discord.HTTPException):
+                    failed+=1
+                    log.warning('Could not apply a default language role; check role hierarchy')
+            log.info('Default language assignment complete: %s members, %s failures; previous choices preserved',done,failed)
+            # One initial private report helps the owner configure existing choices.
+            sent=await self.rows("SELECT value FROM language_settings WHERE key='owner_report_defaults_v1'")
+            if not sent:
+                try:
+                    text,counts=await self.report(guild)
+                    owner=self.bot.get_user(guild.owner_id) or await self.bot.fetch_user(guild.owner_id)
+                    await owner.send('🌐 English is now the default language. Existing other-language choices were preserved.\n'
+                        'Here is your current language/role list for manual channel and translation setup. No translation rules or channel permissions were changed.',
+                        file=discord.File(io.BytesIO(text.encode()),filename='oopz-languages-to-set-up.md'),
+                        allowed_mentions=discord.AllowedMentions.none())
+                    async with aiosqlite.connect(self.database) as db:
+                        await db.execute("INSERT OR REPLACE INTO language_settings VALUES ('owner_report_defaults_v1','sent')")
+                        await db.commit()
+                except Exception as exc:
+                    log.warning('Initial owner language report could not be DMed: %s',type(exc).__name__)
+        except Exception as exc:
+            log.warning('Default language assignment needs attention: %s',exc)
 
     async def publish(self):
         guild=self.bot.get_guild(self.guild_id)
@@ -300,12 +376,13 @@ class Languages:
             raise ValueError('HR needs View Channel, Send Messages and Embed Links in the language picker channel.')
         embed=discord.Embed(title='🌐 CHOOSE MY LANGUAGE',color=0x3498DB,
             description='**New here or already a member? Everyone can choose.**\n\n'
+            '**English is your default.** Pick another language below if you prefer.\n\n'
             'Press the button, find your language and select it. You can change your choice anytime.\n\n'
             '**Deutsch:** Wähle deine Sprache.\n**Português:** Escolha seu idioma.\n'
             '**Français:** Choisissez votre langue.\n**Español:** Elige tu idioma.\n'
             '**Polski:** Wybierz swój język.\n**Русский:** Выберите свой язык.\n\n'
             'Leadership will use your choices to set up the matching language channels. Guides will be handled later.')
-        embed.set_footer(text='Your selection is private; your language role is visible on your profile. No automatic translation is enabled by this button.')
+        embed.set_footer(text='Your role is visible on your profile. Other-language choices notify the server owner privately. Translation setup is manual.')
         message=None
         if settings.get('message') and settings.get('channel')==str(channel.id):
             try:
@@ -341,6 +418,9 @@ class Languages:
             'Keep leadership channels restricted to leadership roles. Language selection does not replace roster verification.',
             'This picker does not configure iTranslator or alter existing guides.',
             'Catalogue reference: https://docs.itranslator.app/fundamentals/languages-list.md'])
+        missed=await self.rows("SELECT code,COUNT(*) AS n FROM language_notifications WHERE status IN ('failed','sending') GROUP BY code")
+        if missed:
+            lines.extend(['','## Owner notifications needing review']+[f'- {LANGUAGES[r["code"]]}: {r["n"]} notifications could not be confirmed.' for r in missed])
         return '\n'.join(lines),counts
 
     async def start(self):
@@ -352,6 +432,9 @@ class Languages:
             await self.publish()
         except Exception as exc:
             log.warning('Language picker setup needs attention: %s',exc)
+        guild=self.bot.get_guild(self.guild_id)
+        if guild and (not hasattr(self,'default_task') or self.default_task.done()):
+            self.default_task=asyncio.create_task(self.assign_defaults(guild))
 
 
 def install(bot,database,guild_id):
@@ -366,6 +449,14 @@ def install(bot,database,guild_id):
 
     async def autocomplete(interaction,current):
         return choices(current)
+
+    @bot.listen('on_member_join')
+    async def assign_join_language(member):
+        if member.guild.id==guild_id and not member.bot:
+            try:
+                await service.select(member,'EN',notify=False,default=True)
+            except (ValueError,discord.HTTPException):
+                log.warning('New member default language could not be assigned')
 
     @group.command(name='choose',description='Choose or change your preferred language; everyone can use this')
     @app_commands.autocomplete(language=autocomplete)
@@ -432,6 +523,7 @@ def install(bot,database,guild_id):
         await interaction.response.send_message(f'Picker channel: {settings.get("channel","not created")}\n'
             f'Manage Roles: {perms.manage_roles}\nManage Channels: {perms.manage_channels}\n'
             f'Saved language choices: {prefs[0]["n"]}\n'
+            'English is the default. Other-language choices are DMed privately to the server owner.\n'
             'HR’s role must sit above its language roles. Existing members can use the button or /language choose.',ephemeral=True)
 
     bot.tree.add_command(group,guild=discord.Object(id=guild_id))
