@@ -13,6 +13,7 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 from vs_calendar import ARMS, add_daily_vs, arms_embed
+from event_messages import ROOT as EVENT_ASSETS, instructions, event_embed, shield_embed, image_path, store_images, validate_images
 
 log = logging.getLogger('oopz-scheduler')
 # Explicitly supplied by the alliance: midnight server = 03:00 German winter time.
@@ -27,6 +28,7 @@ KINDS = {
     'marshall': 'Marshall Guard', 'zombie': 'Zombie Siege',
     'desert': 'Desert Storm', 'stronghold': 'Stronghold Capture',
     'city': 'City Capture', 'sky': 'Sky Battlefront', 'meteorite': 'Meteorite War',
+    'capitol': 'Internal Capitol War',
 }
 CHOICES = [app_commands.Choice(name=v, value=k) for k, v in KINDS.items()]
 SEASON_ONLY = {'stronghold', 'city'}
@@ -84,7 +86,12 @@ class Event:
 def fixed_events(day: date, start: date | None) -> list[Event]:
     events = []
     n = season_day(day, start)
+    if day.weekday() == 4:
+        events.append(Event(f'fixed:capitol:{day}', 'Internal Capitol War', day, time(12)))
+        for hour in (12, 16, 22):
+            events.append(Event(f'shield:{day}:{hour}', 'Shield reminder', day, time(hour), category='shield'))
     if day.weekday() == 5:
+        events.append(Event(f'shield:{day}:0', 'Shield reminder', day, time(), category='shield'))
         name = 'Infinite Octagon' if n else 'Warzone Duel'
         events.append(Event(f'fixed:duel:{day}', name, day, time(12)))
     if day.weekday() in (2, 3, 4):
@@ -121,9 +128,9 @@ def agenda_embed(day: date, events: list[Event], start: date | None, vs_mode=Non
     embed = discord.Embed(title='📋 OOPZ DAILY ORDERS', color=0xE6B84B,
                           description=f'**{day:%A, %d %B %Y}**\n{label}\n🕒 All times are server time.')
     for title, subset in [('ALL DAY', [e for e in events if e.clock is None]),
-                          ("TODAY’S OPERATIONS", [e for e in events if e.clock is not None and e.category != 'arms'])]:
+                          ("TODAY’S OPERATIONS", [e for e in events if e.clock is not None and e.category == 'operation'])]:
         if subset:
-            lines = [e.line() for e in subset]
+            lines = [e.line() + ('\n' + instructions(e) if e.category == 'operation' else '') for e in subset]
             chunks, current = [], ''
             for line in lines:
                 if len(current) + len(line) + 1 > 1000:
@@ -135,6 +142,8 @@ def agenda_embed(day: date, events: list[Event], start: date | None, vs_mode=Non
                 embed.add_field(name=title if i == 0 else title + ' (continued)', value=chunk, inline=False)
     if not events:
         embed.add_field(name='TODAY', value='No events are scheduled yet. Follow R4/R5 for updates.', inline=False)
+    if day.weekday() in (4, 5):
+        embed.add_field(name='🛡️ SHIELD CHECK', value='Buster Day is tomorrow. Prepare shields and cover your offline time.' if day.weekday() == 4 else '**BUSTER DAY IS LIVE — SHIELD UP NOW!** Protect your base while offline.', inline=False)
     if any(e.server for e in events):
         embed.add_field(name='LEADERSHIP ORDERS', value='🚫 Do not jump early. Wait for R4/R5 to give target and movement instructions.', inline=False)
     embed.set_footer(text='Schedule changes after this post appear through /event list. Event starts are posted in #announcements.')
@@ -142,13 +151,7 @@ def agenda_embed(day: date, events: list[Event], start: date | None, vs_mode=Non
 
 
 def start_embed(event: Event):
-    embed = discord.Embed(title=event.title.upper() + ' — STARTING NOW', color=0xE67E22,
-                          description=event.line() + '\n🕒 Server time')
-    if event.server:
-        embed.add_field(name='ORDERS', value='Prepare for the capture and follow R4/R5 instructions.\n🚫 Do not jump until leadership gives the order.', inline=False)
-    else:
-        embed.add_field(name='ORDERS', value='Join the operation and follow R4/R5 instructions.', inline=False)
-    return embed
+    return event_embed(event)
 
 
 class Confirm(discord.ui.View):
@@ -189,6 +192,7 @@ class Scheduler:
     async def init(self):
         async with aiosqlite.connect(self.database) as db:
             await db.executescript('''
+                CREATE TABLE IF NOT EXISTS schedule_images (request_id TEXT NOT NULL, team TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY(request_id,team));
                 CREATE TABLE IF NOT EXISTS schedule_settings (key TEXT PRIMARY KEY, value TEXT);
                 CREATE TABLE IF NOT EXISTS schedule_requests (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,
@@ -243,7 +247,10 @@ class Scheduler:
     async def events(self, day):
         start = await self.season()
         events = fixed_events(day, start)
-        for row in await self.rows('SELECT * FROM schedule_requests WHERE active=1 AND event_date=?', (str(day),)):
+        rows = await self.rows('SELECT * FROM schedule_requests WHERE active=1 AND event_date=?', (str(day),))
+        if any(row['kind'] == 'capitol' for row in rows):
+            events = [e for e in events if e.title != 'Internal Capitol War']
+        for row in rows:
             events.extend(request_events(row, start))
         return sorted(events, key=lambda e: (e.clock is not None, e.clock or time(), e.title))
 
@@ -256,7 +263,7 @@ class Scheduler:
             raise ValueError('Set the season start first, and choose a date within its 56 days.')
         if kind in OUTSIDE_ONLY and season_day(day, start):
             raise ValueError('That event is out-of-season only.')
-        if kind in {'desert', 'sky'} and day.weekday() != 4:
+        if kind in {'desert', 'sky', 'capitol'} and day.weekday() != 4:
             raise ValueError('This event must be on a Friday.')
         if kind == 'meteorite' and day.weekday() != 5:
             raise ValueError('Meteorite War must be on a Saturday.')
@@ -279,6 +286,10 @@ class Scheduler:
     async def save_request(self, actor, kind, day, clock, level, server, request_id=None):
         start = await self.season()
         self.validate(kind, day, clock, level, server, start)
+        if kind == 'capitol' and request_id is None:
+            existing = await self.rows("SELECT id FROM schedule_requests WHERE kind='capitol' AND active=1 AND event_date=?", (str(day),))
+            if existing:
+                request_id = existing[0]['id']
         clock_text = clock.strftime('%H:%M') if clock else None
         async with self.lock, aiosqlite.connect(self.database) as db:
             duplicate = await (await db.execute('''SELECT id FROM schedule_requests WHERE active=1 AND kind=?
@@ -316,7 +327,7 @@ class Scheduler:
                              (str(actor), 'cancel event', str(request_id), datetime.now(timezone.utc).isoformat()))
             await db.commit()
 
-    async def deliver(self, key, channel_id, embed, ping=False, r4_ping=False):
+    async def deliver(self, key, channel_id, embed, ping=False, r4_ping=False, image=None):
         channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
         if getattr(getattr(channel, 'guild', None), 'id', None) != self.guild_id:
             raise RuntimeError('Schedule destination is not in the configured guild.')
@@ -327,6 +338,8 @@ class Scheduler:
             role = channel.guild.get_role(R4_ROLE)
             if role is None or not (permissions.mention_everyone or role.mentionable):
                 raise RuntimeError('Cannot notify R4: role must be mentionable or bot needs Mention Everyone in the R4 channel.')
+        if image and not getattr(permissions, 'attach_files', False):
+            raise RuntimeError('Missing Attach Files permission for event image.')
         # Claim before sending: uncertain sends are never replayed after restart.
         # This favors avoiding duplicate @everyone notifications over late catch-up.
         async with aiosqlite.connect(self.database) as db:
@@ -336,9 +349,14 @@ class Scheduler:
             if not cur.rowcount:
                 return
         try:
+            extras = {}
+            if image:
+                extras['file'] = discord.File(image, filename='event-layout' + image.suffix)
+                embed = embed.copy()
+                embed.set_image(url='attachment://' + extras['file'].filename)
             message = await channel.send(content='@everyone' if ping else (f'<@&{R4_ROLE}>' if r4_ping else None), embed=embed,
                 allowed_mentions=discord.AllowedMentions(everyone=ping, users=False,
-                    roles=[discord.Object(id=R4_ROLE)] if r4_ping else False, replied_user=False))
+                    roles=[discord.Object(id=R4_ROLE)] if r4_ping else False, replied_user=False), **extras)
         except Exception:
             log.exception('Schedule delivery %s failed; left claimed to prevent a duplicate notification', key)
             return
@@ -450,10 +468,30 @@ class Scheduler:
                     except Exception:
                         log.exception('Cannot deliver Sunday VS reminder')
         for event in events:
+            if event.clock and event.title.startswith('Desert Storm') and now.time().replace(tzinfo=None) < time(0, 15):
+                path = await image_path(self, event)
+                if path:
+                    try:
+                        layout = event_embed(event)
+                        layout.title = event.title.upper() + ' — TODAY’S TEAM LAYOUT'
+                        await self.deliver(f'layout-reset:{event.key}:{event.day}', DAILY_CHANNEL, layout, image=path)
+                    except Exception:
+                        log.exception('Cannot deliver team reset image')
+        # Include tomorrow: an early event may have its two-hour reminder today.
+        for event in events + await self.events(day + timedelta(days=1)):
+            if event.clock and event.category == 'operation':
+                for minutes, window in ((120, 10), (5, 2)):
+                    due = event.start - timedelta(minutes=minutes)
+                    if timedelta(0) <= now - due < timedelta(minutes=window) and now < event.start:
+                        try:
+                            await self.deliver(f'reminder:{event.key}:{event.start.isoformat()}:{minutes}', ANNOUNCEMENTS_CHANNEL, event_embed(event, minutes), ping=True, image=await image_path(self, event))
+                        except Exception:
+                            log.exception('Cannot deliver countdown reminder')
+        for event in events:
             if event.clock and timedelta(0) <= now - event.start < timedelta(minutes=10):
                 try:
-                    embed = arms_embed(day, event.clock, mode) if event.category == 'arms' else start_embed(event)
-                    await self.deliver(event.key, ANNOUNCEMENTS_CHANNEL, embed, ping=True)
+                    embed = arms_embed(day, event.clock, mode) if event.category == 'arms' else (shield_embed(event) if event.category == 'shield' else start_embed(event))
+                    await self.deliver(event.key, ANNOUNCEMENTS_CHANNEL, embed, ping=True, image=await image_path(self, event))
                 except Exception:
                     log.exception('Cannot deliver scheduled event %s', event.key)
 
@@ -478,7 +516,7 @@ class Scheduler:
                     ready = (channel.guild.id == self.guild_id and permissions.view_channel
                              and permissions.send_messages and permissions.embed_links
                              and (not ping or permissions.mention_everyone))
-                    log.info('Scheduler channel %s ready=%s everyone=%s', channel_id, ready, ping)
+                    log.info('Scheduler channel %s ready=%s everyone=%s attach_files=%s', channel_id, ready, ping, getattr(permissions, 'attach_files', False))
                     if channel_id == R4_CHANNEL:
                         r4 = channel.guild.get_role(R4_ROLE)
                         log.info('Sunday R4 notifications ready=%s', bool(r4 and (permissions.mention_everyone or r4.mentionable)))
@@ -486,6 +524,7 @@ class Scheduler:
                     log.exception('Scheduler cannot check channel %s', channel_id)
             self.worker.start()
             log.info('Scheduler active: server UTC-02:00, daily orders 00:00, R4/R5 controls enabled')
+            log.info('Reviewed reminders active: reset + 2h + 5m + start; Friday Capitol overrides; shield memes Friday=%s Saturday=%s', (EVENT_ASSETS / 'shield-friday.png').is_file(), (EVENT_ASSETS / 'shield-saturday.png').is_file())
             log.info('VS active: daily minimum 3.6M; Save cap 7.2M; weekly mode defaults Unknown; Sunday R4 nudge enabled')
             today = datetime.now(SERVER_TIME).date()
             next_monday = today + timedelta(days=7-today.weekday())
@@ -612,9 +651,12 @@ def install(bot, database, guild_id):
     @app_commands.choices(event=CHOICES)
     async def event_add(interaction: discord.Interaction, event: str, date: str,
                         time: str | None = None, level: app_commands.Range[int, 1, 100] | None = None,
-                        server: app_commands.Range[int, 1, 99999] | None = None):
+                        server: app_commands.Range[int, 1, 99999] | None = None,
+                        team_a_image: discord.Attachment | None = None, team_b_image: discord.Attachment | None = None):
         if not await leader(interaction): return
+        uploads = {'A': team_a_image, 'B': team_b_image}
         try:
+            validate_images(event, uploads)
             day, clock = parse_date(date), parse_time(time) if time else None
             slots = scheduler.validate(event, day, clock, level, server, await scheduler.season())
         except ValueError as exc:
@@ -622,7 +664,8 @@ def install(bot, database, guild_id):
             return
         async def save():
             rid = await scheduler.save_request(interaction.user.id, event, day, clock, level, server)
-            return f'Saved event #{rid}. It will appear in daily orders and post with @everyone in #announcements at its start time.'
+            await store_images(scheduler, rid, uploads)
+            return f'Saved event #{rid}. It will appear at reset, with @everyone reminders 2 hours and 5 minutes before, plus starting now. Capitol changes apply to this Friday only.'
         await interaction.response.send_message('**Preview — ' + str(day) + '**\n' + '\n'.join(e.line() for e in slots) +
             '\nDaily orders: <#1524785999845130321> · Event starts: <#1524785541059448966> with @everyone.\nNo coordinates will be posted.',
             ephemeral=True, allowed_mentions=discord.AllowedMentions.none(), view=Confirm(interaction.user.id, save))
@@ -630,12 +673,15 @@ def install(bot, database, guild_id):
     @events.command(name='edit', description='Preview changing an individual event; provide all its required fields')
     async def event_edit(interaction: discord.Interaction, id: int, date: str, time: str | None = None,
                          level: app_commands.Range[int, 1, 100] | None = None,
-                         server: app_commands.Range[int, 1, 99999] | None = None):
+                         server: app_commands.Range[int, 1, 99999] | None = None,
+                         team_a_image: discord.Attachment | None = None, team_b_image: discord.Attachment | None = None):
         if not await leader(interaction): return
+        uploads = {'A': team_a_image, 'B': team_b_image}
         rows = await scheduler.rows('SELECT * FROM schedule_requests WHERE id=? AND active=1', (id,))
         try:
             if not rows: raise ValueError('No active event has that ID.')
             row = rows[0]
+            validate_images(row['kind'], uploads)
             day, clock = parse_date(date), parse_time(time) if time else None
             slots = scheduler.validate(row['kind'], day, clock, level, server, await scheduler.season())
         except ValueError as exc:
@@ -643,6 +689,7 @@ def install(bot, database, guild_id):
             return
         async def save():
             await scheduler.save_request(interaction.user.id, row['kind'], day, clock, level, server, id)
+            await store_images(scheduler, id, uploads)
             return f'Event #{id} updated. Already-posted daily orders are unchanged; /event list shows the latest schedule.'
         await interaction.response.send_message(f'**Updated event #{id} — {day}**\n' + '\n'.join(e.line() for e in slots),
                                                 ephemeral=True, view=Confirm(interaction.user.id, save))
@@ -690,14 +737,14 @@ def install(bot, database, guild_id):
         if not await leader(interaction): return
         await interaction.response.defer(ephemeral=True)
         lines = [f'Server time: {datetime.now(SERVER_TIME):%Y-%m-%d %H:%M} · UTC−02:00',
-                 'Daily orders: 00:00 · no ping. Event starts: @everyone. Multi-day events: daily orders only.',
+                 'Daily orders: 00:00 · no ping. Events: @everyone at 2h, 5m and start. Multi-day events: daily orders only. Shield: Friday 12:00/16:00/22:00, Saturday 00:00.',
                  f'Scheduler running: {scheduler.worker.is_running()}']
         for cid, ping in [(DAILY_CHANNEL, False), (ANNOUNCEMENTS_CHANNEL, True)]:
             try:
                 channel = bot.get_channel(cid) or await bot.fetch_channel(cid)
                 p = channel.permissions_for(channel.guild.me)
                 ok = channel.guild.id == guild_id and p.send_messages and p.embed_links and (not ping or p.mention_everyone)
-                lines.append(f'<#{cid}>: ' + ('ready' if ok else 'check Send Messages / Embed Links / Mention Everyone'))
+                lines.append(f'<#{cid}>: ' + ('ready' if ok else 'check Send Messages / Embed Links / Mention Everyone') + f' · Attach Files: {p.attach_files}')
             except discord.HTTPException:
                 lines.append(f'<#{cid}>: inaccessible')
         uncertain = await scheduler.rows("SELECT key FROM schedule_deliveries WHERE status='claimed' ORDER BY claimed_at DESC LIMIT 5")
