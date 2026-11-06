@@ -75,7 +75,7 @@ preserved. Back up the whole database, not just roster CSVs, to retain schedules
 
 The worker checks every 20 seconds. A daily agenda can catch up until 00:15.
 An event can catch up for ten minutes after its start; older messages are skipped
-to avoid floods after downtime. There are no early countdown reminders.
+to avoid floods after downtime. Countdown reminders send at two hours and five minutes before each timed operation. Arms Race keeps its original start alerts; multi-day events stay in daily orders. A two-hour reminder may fall on the preceding day. Countdown catch-up is limited to ten minutes (two-hour alert) or two minutes (five-minute alert), never after the start.
 
 Delivery is claimed before sending, preventing duplicate pings after restarts.
 If a network failure makes delivery uncertain, it is not retried automatically;
@@ -129,4 +129,50 @@ Saturday VS scoring; it is not advertised as earning both types of points.
 Task references (alliance rules and server times override generic advice):
 - https://www.lastwargame.online/en/game-alliance-duel/
 - https://www.lastwargame.online/en/arms-race-complete-guide/
+
+
+## Reviewed event reminders — November 2026
+
+At reset, daily orders include event instructions. Timed operations also send
+@everyone in announcements at two hours before, five minutes before and starting
+now. Existing start delivery keys are preserved, so a restart does not replay them.
+
+Marshall Guard: start rallies with Loki and join until personal and alliance
+rewards are maxed. Zombie Siege: put troops on the wall; Level 7+ also reinforce
+bus targets on waves 4, 8, 12, 16 and 20. General’s Trial: choose your highest level,
+ask for help and use one-minute rallies. Gold Zombies: one minute for what you
+can kill alone, five minutes for what you cannot; maximize rewards. Sky Battlefront:
+reach 50 tokens daily. Captures keep the no-coordinates/wait-for-leadership orders.
+
+### Internal Capitol War
+
+Automatically occurs every Friday at 12:00 server time, in or out of season.
+R4/R5 can change ONE Friday with `/event add event:Internal Capitol War
+ date:2026-11-13 time:15:00`, then Confirm and save. Repeating the command for the
+same Friday replaces its override. `/event edit` also supports its saved event ID.
+Later Fridays remain 12:00. Cancelling an override restores the default 12:00 slot.
+No buffs for eight hours from the actual start; messages calculate the end time,
+including the following date when needed.
+
+### Desert Storm images
+
+When scheduling a Friday, use optional `team_a_image` and `team_b_image` attachment
+options on `/event add`. PNG/JPG/WebP/GIF up to 8 MB per team. `/event edit` accepts
+the same options; omitted images preserve the saved layout. Supply the date and
+usual event fields when editing. Team A remains 09:30; Team B remains 18:30.
+Layouts are copied into `event_images/` beside the live SQLite database and the
+paths are saved in `schedule_images`; back up both that folder and the database.
+Team layouts accompany two-hour, five-minute and start alerts. At reset, each
+saved layout appears in its own extra daily-orders post, without mentions.
+The example layout from the review is not assigned to a real occurrence.
+
+### Shield reminders
+
+@everyone in announcements every Friday at 12:00, 16:00 and 22:00, using
+`shield-friday.png` (bicycle meme). Saturday at 00:00 uses the stronger BUSTER DAY
+IS LIVE wording and `shield-saturday.png` (forgot-to-shield meme). Friday and
+Saturday daily orders also contain a shield notice. Bot needs Attach Files in
+daily-orders and announcements, in addition to existing message permissions.
+
+No missed reminders older than their catch-up window are replayed on deployment.
 
