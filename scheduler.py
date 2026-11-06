@@ -29,6 +29,7 @@ KINDS = {
     'desert': 'Desert Storm', 'stronghold': 'Stronghold Capture',
     'city': 'City Capture', 'sky': 'Sky Battlefront', 'meteorite': 'Meteorite War',
     'capitol': 'Internal Capitol War',
+    'duel': 'Warzone Duel / Infinite Octagon',
 }
 CHOICES = [app_commands.Choice(name=v, value=k) for k, v in KINDS.items()]
 SEASON_ONLY = {'stronghold', 'city'}
@@ -92,8 +93,6 @@ def fixed_events(day: date, start: date | None) -> list[Event]:
             events.append(Event(f'shield:{day}:{hour}', 'Shield reminder', day, time(hour), category='shield'))
     if day.weekday() == 5:
         events.append(Event(f'shield:{day}:0', 'Shield reminder', day, time(), category='shield'))
-        name = 'Infinite Octagon' if n else 'Warzone Duel'
-        events.append(Event(f'fixed:duel:{day}', name, day, time(12)))
     if day.weekday() in (2, 3, 4):
         wednesday = day - timedelta(days=day.weekday() - 2)
         trial = ((wednesday - TRIAL_ANCHOR).days // 7) % 2 == 0
@@ -118,7 +117,8 @@ def request_events(row, start: date | None) -> list[Event]:
         [('early', time(0, 10)), ('noon', time(12))] if kind == 'meteorite' else
         [('', time(12) if kind == 'sky' else parse_time(row['event_time']))]
     )
-    return [Event(f"manual:{row['id']}:{label}", KINDS[kind] + (f' · Team {label}' if kind == 'desert' else ''),
+    title = ('Infinite Octagon' if active else 'Warzone Duel') if kind == 'duel' else KINDS[kind]
+    return [Event(f"manual:{row['id']}:{label}", title + (f' · Team {label}' if kind == 'desert' else ''),
                   day, clock, row['level'], row['server'], row['id']) for label, clock in slots]
 
 
@@ -317,6 +317,31 @@ class Scheduler:
                              (str(actor), 'save event', str(request_id), stamp))
             await db.commit()
         return request_id
+
+    async def team_image_slots(self, request_id, uploads, expected_day):
+        rows = await self.rows('SELECT * FROM schedule_requests WHERE id=? AND active=1', (request_id,))
+        if not rows or rows[0]['kind'] != 'desert':
+            raise ValueError('Choose an active Desert Storm event ID from /event list.')
+        row = rows[0]
+        if parse_date(row['event_date']) != expected_day:
+            raise ValueError('For an image-only update, enter the event’s existing date.')
+        validate_images('desert', uploads)
+        slots = request_events(row, await self.season())
+        selected = [e for e in slots if uploads.get(e.key.rsplit(':', 1)[-1]) is not None]
+        if not selected:
+            raise ValueError('Attach a Team A or Team B image.')
+        if any(e.start <= datetime.now(SERVER_TIME) for e in selected):
+            raise ValueError('That team has already started. Attach only the upcoming team’s image.')
+        return selected
+
+    async def update_team_images(self, request_id, uploads, expected_day, actor):
+        async with self.lock:
+            await self.team_image_slots(request_id, uploads, expected_day)
+            await store_images(self, request_id, uploads)
+            async with aiosqlite.connect(self.database) as db:
+                await db.execute('INSERT INTO schedule_audit(actor,action,detail,at) VALUES (?,?,?,?)',
+                    (str(actor), 'update team images', str(request_id), datetime.now(timezone.utc).isoformat()))
+                await db.commit()
 
     async def cancel(self, request_id, actor):
         async with self.lock, aiosqlite.connect(self.database) as db:
@@ -524,6 +549,7 @@ class Scheduler:
                     log.exception('Scheduler cannot check channel %s', channel_id)
             self.worker.start()
             log.info('Scheduler active: server UTC-02:00, daily orders 00:00, R4/R5 controls enabled')
+            log.info('Warzone Duel / Infinite Octagon: R4/R5 schedule each occurrence; upcoming Desert Storm team images editable separately')
             log.info('Reviewed reminders active: reset + 2h + 5m + start; Friday Capitol overrides; shield memes Friday=%s Saturday=%s', (EVENT_ASSETS / 'shield-friday.png').is_file(), (EVENT_ASSETS / 'shield-saturday.png').is_file())
             log.info('VS active: daily minimum 3.6M; Save cap 7.2M; weekly mode defaults Unknown; Sunday R4 nudge enabled')
             today = datetime.now(SERVER_TIME).date()
@@ -683,11 +709,15 @@ def install(bot, database, guild_id):
             row = rows[0]
             validate_images(row['kind'], uploads)
             day, clock = parse_date(date), parse_time(time) if time else None
-            slots = scheduler.validate(row['kind'], day, clock, level, server, await scheduler.season())
+            image_only = (row['kind'] == 'desert' and any(uploads.values()) and time is None and level is None and server is None and str(day) == row['event_date'])
+            slots = await scheduler.team_image_slots(id, uploads, day) if image_only else scheduler.validate(row['kind'], day, clock, level, server, await scheduler.season())
         except ValueError as exc:
             await interaction.response.send_message(str(exc), ephemeral=True)
             return
         async def save():
+            if image_only:
+                await scheduler.update_team_images(id, uploads, day, interaction.user.id)
+                return f'Pictures updated for event #{id}. Team times and already-sent messages are unchanged; upcoming reminders will use the new picture.'
             await scheduler.save_request(interaction.user.id, row['kind'], day, clock, level, server, id)
             await store_images(scheduler, id, uploads)
             return f'Event #{id} updated. Already-posted daily orders are unchanged; /event list shows the latest schedule.'
