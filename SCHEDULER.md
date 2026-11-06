@@ -12,7 +12,7 @@ German daylight-saving changes do not move the server schedule.
 - General's Trial / Gold Zombies: included in daily orders Wednesday–Friday,
   with no separate @everyone post. General's Trial is anchored to 4–6 Nov 2026,
   Gold Zombies to 11–13 Nov 2026, each repeating every 14 days.
-- Warzone Duel: Saturday 12:00; called Infinite Octagon during the season.
+- Warzone Duel / Infinite Octagon: R4/R5 schedule each occurrence with `/event add`, date and time. No automatic Saturday slot. The season determines its displayed name.
 - Crimson Legion: Tuesday/Friday 12:00 from Season Week 2 through Day 56.
 - No automatic Marshall Guard, Zombie Siege, Desert Storm, capture, Sky
   Battlefront or Meteorite War occurrence is invented. Leadership schedules each.
@@ -175,4 +175,10 @@ Saturday daily orders also contain a shield notice. Bot needs Attach Files in
 daily-orders and announcements, in addition to existing message permissions.
 
 No missed reminders older than their catch-up window are replayed on deployment.
+
+## Individual scheduling and upcoming team pictures
+
+R4/R5 schedule Warzone Duel / Infinite Octagon through `/event add`, choosing its date and server time. It has an editable numbered ID; no recurring duel is generated.
+
+To attach Team B’s layout after Team A has started, use `/event edit id:8 date:2026-11-06 team_b_image:<upload>` with the actual ID/date. Leave time, level, server and Team A image empty. Image-only changes check the selected team’s start time, preserve schedules and earlier posts, and remain allowed until that team starts. Changing event times still requires all occurrences to be in the future.
 
