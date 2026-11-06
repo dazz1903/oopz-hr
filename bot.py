@@ -1727,6 +1727,65 @@ async def welcome(interaction: discord.Interaction, member: discord.Member):
         )
 
 
+@bot.tree.command(name="missing_discord", description="Privately list roster players not matched to current Discord members")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def missing_discord(interaction: discord.Interaction):
+    roles = {r.id for r in getattr(interaction.user, 'roles', [])}
+    if interaction.guild_id != GUILD_ID or not (admin_only(interaction) or roles & {1548703462332694618, 1548703579055857774}):
+        await interaction.response.send_message('Only OOPZ R4/R5 or Manage Server staff can use this report.', ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    if guild is None:
+        return
+    if not guild.chunked:
+        try:
+            await guild.chunk(cache=True)
+        except Exception:
+            await interaction.followup.send('I could not load the full Discord member list. Please try again shortly.', ephemeral=True)
+            return
+        if not guild.chunked:
+            await interaction.followup.send('The Discord member list is incomplete. Please try again shortly.', ephemeral=True)
+            return
+    roster = await get_roster()
+    if not roster:
+        await interaction.followup.send('Upload the latest LWMA roster CSV first; HR has no roster to compare.', ephemeral=True)
+        return
+    rows = await db_fetchall('SELECT discord_id, last_verified_name, last_verified_uid, ever_verified FROM members')
+    by_id = {int(r['discord_id']): r for r in rows}
+    matched = set()
+    unresolved = 0
+    for member in list(guild.members):
+        if member.bot:
+            continue
+        identity = await resolve_roster_identity(member, roster, by_id.get(member.id))
+        if identity:
+            matched.add(identity[0])
+        else:
+            unresolved += 1
+    missing = sorted(set(roster) - matched, key=str.casefold)
+    imported = await db_fetchone("SELECT value FROM meta WHERE key='last_import_at'")
+    last_import = imported['value'] if imported else 'Unknown'
+    lines = ['OOPZ — ROSTER PLAYERS NOT MATCHED ON DISCORD',
+             f'Generated: {iso()}', f'Last roster import: {last_import}',
+             f'Roster: {len(roster)} | Matched: {len(matched)} | Not matched: {len(missing)}',
+             f'Current Discord members with unresolved roster identity: {unresolved}', '',
+             'This compares the saved roster with current Discord members, including offline members.',
+             'Saved player UID links take priority. Someone using an unrecognised nickname may already be here.',
+             'Check nicknames or use /link_member before assuming someone has not joined.', '']
+    for name in missing:
+        info = roster[name]
+        lines.append(f"- {name} | Rank {info.get('rank') or '?'} | HQ {info.get('level') or '?'}")
+    if not missing:
+        lines.append('Everyone in the saved roster is matched to a current Discord member.')
+    await interaction.followup.send(
+        f'**{len(missing)} roster players are not matched to a current Discord member.** '
+        f'({len(matched)} matched out of {len(roster)}.) The private list is attached. '
+        'Unrecognised nicknames can also appear as missing; check before chasing people.',
+        file=discord.File(io.BytesIO("\n".join(lines).encode('utf-8')), filename='oopz-missing-discord.txt'),
+        ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
 if __name__ == "__main__":
     bot.run(TOKEN)
 
