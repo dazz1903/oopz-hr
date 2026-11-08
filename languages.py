@@ -14,7 +14,7 @@ from discord import app_commands
 log = logging.getLogger('oopz-languages')
 LEADERS = {1548703462332694618, 1548703579055857774}
 CHANNEL_NAME = 'choose-your-language'
-READY_LANGUAGES = ('EN','PT','FR','DE','PL','ID')
+READY_LANGUAGES = ('EN','PT','FR','DE','PL','ID','KO')
 CAMPAIGN_KEY = 'language_confirmation_20261108'
 
 # Factual language names/codes from iTranslator's published catalogue:
@@ -155,13 +155,14 @@ def staff_target(target):
 
 
 def channel_language(name):
-    names={'announcements':'EN','daily-orders':'EN','🇺🇸-english-chat':'EN','🇧🇷-chat':'PT','🇫🇷-chat':'FR','🇩🇪-chat':'DE','🇵🇱-chat':'PL','🇮🇩-chat':'ID',
-        'english-chat':'EN','brazilian-chat':'PT','french-chat':'FR','german-chat':'DE','polish-chat':'PL','indonesian-chat':'ID'}
+    names={'announcements':'EN','daily-orders':'EN','🇺🇸-english-chat':'EN','🇧🇷-chat':'PT','🇫🇷-chat':'FR','🇩🇪-chat':'DE','🇵🇱-chat':'PL','🇮🇩-chat':'ID','🇰🇷-chat':'KO',
+        'english-chat':'EN','brazilian-chat':'PT','french-chat':'FR','german-chat':'DE','polish-chat':'PL','indonesian-chat':'ID','korean-chat':'KO'}
     if name in names:return names[name]
     for prefix in ('announcements-','daily-orders-'):
         if name.startswith(prefix):
             suffix=name[len(prefix):].upper()
             if suffix=='IN':suffix='ID'
+            if suffix=='KR':suffix='KO'
             return suffix if suffix in READY_LANGUAGES else None
     return None
 
@@ -412,8 +413,8 @@ class Languages:
             'Press the button, find your language and select it. You can change your choice anytime.\n\n'
             '**Deutsch:** Wähle deine Sprache.\n**Português:** Escolha seu idioma.\n'
             '**Français:** Choisissez votre langue.\n**Español:** Elige tu idioma.\n'
-            '**Polski:** Wybierz swój język.\n**Bahasa Indonesia:** Pilih bahasa Anda.\n**Русский:** Выберите свой язык.\n\n'
-            'Choose English, Português, Français, Deutsch, Polski, Bahasa Indonesia or another language. Your selection gives you one language role; it can be changed anytime. Guides will be handled later.')
+            '**Polski:** Wybierz swój język.\n**Bahasa Indonesia:** Pilih bahasa Anda.\n**한국어:** 언어를 선택해 주세요.\n**Русский:** Выберите свой язык.\n\n'
+            'Choose English, Português, Français, Deutsch, Polski, Bahasa Indonesia, 한국어 or another language. Your selection gives you one language role; it can be changed anytime. Guides will be handled later.')
         embed.set_footer(text='Your selected role controls access where channel permissions are configured. Other-language choices notify the server owner privately.')
         message=None
         if settings.get('message') and settings.get('channel')==str(channel.id):
@@ -445,7 +446,7 @@ class Languages:
             lines.append(f'| {LANGUAGES[code]} — {NATIVE.get(code,LANGUAGES[code])} | {code} | {counts.get(code,0)} | {mappings.get(code,"Not created yet")} | {"Free" if code in FREE else "Premium/Pro"} |')
         if not codes:
             lines.append('| Nobody has chosen a language yet | — | 0 | — | — |')
-        lines.extend(['','Use the matching language role when setting up its translated channels. English, Portuguese, French, German, Polish and Indonesian roles are prepared automatically.',
+        lines.extend(['','Use the matching language role when setting up its translated channels. English, Portuguese, French, German, Polish, Indonesian and Korean roles are prepared automatically.',
             'Use /language role to create a role before anyone selects it. Language roles have no server-wide permissions.',
             'Keep leadership channels restricted to leadership roles. Language selection does not replace roster verification.',
             'HR reconciles one saved language role and matching language-channel visibility. iTranslator routes are configured separately. Existing guides are unchanged.',
@@ -564,7 +565,7 @@ class Languages:
         try:
             report,counts=await self.member_audit(guild)
             owner=self.bot.get_user(guild.owner_id) or await self.bot.fetch_user(guild.owner_id)
-            await owner.send('🌐 **Language setup check**\nEnglish, Portuguese, French, German, Polish and Indonesian roles are ready. '
+            await owner.send('🌐 **Language setup check**\nEnglish, Portuguese, French, German, Polish, Indonesian and Korean roles are ready. '
                 f'{counts["unconfirmed"]} members still need to confirm a language. '
                 f'{counts["role_issues"]} role issues; {counts["access_issues"]} members with channel-access issues. '
                 'The attached private report lists exactly what needs checking. Use /language audit for a fresh copy.',
@@ -608,7 +609,7 @@ def install(bot,database,guild_id):
                 await service.select(member,'EN',notify=False,default=True)
                 settings={r['key']:r['value'] for r in await service.rows('SELECT * FROM language_settings')}
                 if settings.get('channel'):
-                    try:await member.send(f'🌐 Welcome to OOPZ! Please confirm your language here: https://discord.com/channels/{guild_id}/{settings["channel"]}. English stays your default until you choose. Polski and Bahasa Indonesia are available too.',allowed_mentions=discord.AllowedMentions.none())
+                    try:await member.send(f'🌐 Welcome to OOPZ! Please confirm your language here: https://discord.com/channels/{guild_id}/{settings["channel"]}. English stays your default until you choose. Polski, Bahasa Indonesia and 한국어 are available too.',allowed_mentions=discord.AllowedMentions.none())
                     except discord.HTTPException:pass
             except (ValueError,discord.HTTPException):
                 log.warning('New member default language could not be assigned')
