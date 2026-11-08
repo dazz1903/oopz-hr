@@ -104,3 +104,8 @@ access change is logged per channel and reported by the member audit; it does no
 silently claim that every channel is fixed. Back up the existing SQLite database
 to keep choices, confirmations and access snapshots.
 
+## Korean
+
+Korean (KO / 한국어) uses announcements-kr, daily-orders-kr and 🇰🇷-chat.
+It follows the same saved role, member confirmation and channel access checks.
+
