@@ -65,7 +65,42 @@ server owner a private message with the member, language and assigned role ID.
 Choosing the same language again does not repeat the message. Bot accounts are
 excluded. Failed DMs are recorded in `/language report`; there is no public fallback.
 
-English, Portuguese and French roles are prepared automatically. On first rollout,
-the owner receives a private list of current choices and role IDs for manual setup.
-No translation links or channel permissions are configured by this feature.
+Six language roles are prepared automatically, as described below. The owner
+receives a private rollout audit. HR repairs the recognised language channels;
+iTranslator translation routes are configured separately.
+
+
+## November 2026: six-language confirmation and access checks
+
+English, Brazilian Portuguese, French, German, Polish and Indonesian roles are
+prepared automatically. PT_BR choices use the existing PT channel role, so the
+Brazilian Portuguese option does not strand members without Portuguese channels.
+
+On rollout HR posts one everyone prompt in choose-your-language (a normal post
+if it lacks Mention Everyone there). Existing preferences remain in place.
+Members must explicitly choose/confirm their language, including English. The
+language_confirmed table distinguishes an active choice from the English default.
+New arrivals receive a DM linking to the picker when DMs are available.
+
+HR reconciles saved language roles on restart and when a managed language role
+changes. It removes duplicate managed language roles, preserving unrelated roles.
+HR never guesses a member's language from their name or nationality.
+
+Recognised chat, announcements and daily-orders channels are given matching
+language-role visibility; @everyone is denied View Channel and broad normal
+member/rank overrides are cleared for that permission. Other overwrite settings
+are preserved. Staff and bot access is preserved. Officer channels, guides,
+welcome and choose-your-language are outside this operation. Before changing
+access, HR saves each channel's previous overwrites in language_access_backup.
+Owner/admin accounts can always see all channels; R4/R5 moderation access remains.
+The Indonesian channels may use the existing -in suffix; HR maps that to ID.
+
+- /language audit: private member confirmation, role and channel-access report.
+- /language repair: reconcile saved roles and matching language-channel access.
+- /language report: language counts and role IDs, as before.
+
+The owner receives one private rollout audit with outstanding issues. A failed
+access change is logged per channel and reported by the member audit; it does not
+silently claim that every channel is fixed. Back up the existing SQLite database
+to keep choices, confirmations and access snapshots.
 
