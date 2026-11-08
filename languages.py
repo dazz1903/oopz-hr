@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import json
 from datetime import datetime, timezone
 
 import aiosqlite
@@ -13,6 +14,8 @@ from discord import app_commands
 log = logging.getLogger('oopz-languages')
 LEADERS = {1548703462332694618, 1548703579055857774}
 CHANNEL_NAME = 'choose-your-language'
+READY_LANGUAGES = ('EN','PT','FR','DE','PL','ID')
+CAMPAIGN_KEY = 'language_confirmation_20261108'
 
 # Factual language names/codes from iTranslator's published catalogue:
 # https://docs.itranslator.app/fundamentals/languages-list.md
@@ -144,6 +147,25 @@ NATIVE = {
 }
 
 
+def staff_target(target):
+    permissions=getattr(target,'guild_permissions',None) or getattr(target,'permissions',None)
+    return (target.id in LEADERS or getattr(target,'name','')=='🔐 OOPZ Leadership' or
+        bool({r.id for r in getattr(target,'roles',[])} & LEADERS) or
+        bool(permissions and (getattr(permissions,'administrator',False) or getattr(permissions,'manage_guild',False))))
+
+
+def channel_language(name):
+    names={'announcements':'EN','daily-orders':'EN','🇺🇸-english-chat':'EN','🇧🇷-chat':'PT','🇫🇷-chat':'FR','🇩🇪-chat':'DE','🇵🇱-chat':'PL','🇮🇩-chat':'ID',
+        'english-chat':'EN','brazilian-chat':'PT','french-chat':'FR','german-chat':'DE','polish-chat':'PL','indonesian-chat':'ID'}
+    if name in names:return names[name]
+    for prefix in ('announcements-','daily-orders-'):
+        if name.startswith(prefix):
+            suffix=name[len(prefix):].upper()
+            if suffix=='IN':suffix='ID'
+            return suffix if suffix in READY_LANGUAGES else None
+    return None
+
+
 def role_name(code):
     return f'🌐 {code} · {NATIVE.get(code, LANGUAGES[code])}'
 
@@ -226,6 +248,8 @@ class Languages:
     async def init(self):
         async with aiosqlite.connect(self.database) as db:
             await db.executescript('''
+                CREATE TABLE IF NOT EXISTS language_access_backup(campaign TEXT NOT NULL,channel_id TEXT NOT NULL,overwrites TEXT NOT NULL,PRIMARY KEY(campaign,channel_id));
+                CREATE TABLE IF NOT EXISTS language_confirmed(member_id TEXT PRIMARY KEY,confirmed_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS language_roles(code TEXT PRIMARY KEY,role_id TEXT UNIQUE NOT NULL);
                 CREATE TABLE IF NOT EXISTS language_preferences(member_id TEXT PRIMARY KEY,code TEXT NOT NULL,updated_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS language_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -240,6 +264,7 @@ class Languages:
             return await (await db.execute(query,values)).fetchall()
 
     async def get_role(self,guild,code):
+        code='PT' if code=='PT_BR' else code
         if code not in LANGUAGES or guild.id!=self.guild_id:
             raise ValueError('Unknown language or server.')
         mappings=await self.rows('SELECT role_id FROM language_roles WHERE code=?',(code,))
@@ -261,11 +286,13 @@ class Languages:
         return role
 
     async def select(self,member,code,*,notify=True,default=False):
+        code='PT' if code=='PT_BR' else code
         if member.guild.id!=self.guild_id or member.bot or code not in LANGUAGES:
             raise ValueError('Invalid language selection.')
         async with self.lock:
             previous=await self.rows('SELECT code FROM language_preferences WHERE member_id=?',(str(member.id),))
             previous_code=previous[0]['code'] if previous else None
+            if previous_code=='PT_BR':previous_code='PT'
             if default and previous_code:
                 code=previous_code
             role=await self.get_role(member.guild,code)
@@ -285,6 +312,8 @@ class Languages:
                 stamp=datetime.now(timezone.utc).isoformat()
                 await db.execute('INSERT OR REPLACE INTO language_preferences VALUES (?,?,?)',
                     (str(member.id),code,stamp))
+                if not default:
+                    await db.execute('INSERT OR REPLACE INTO language_confirmed VALUES (?,?)',(str(member.id),stamp))
                 note_id=None
                 if notify and not default and code!='EN' and code!=previous_code:
                     cur=await db.execute('INSERT INTO language_notifications(member_id,code,role_id,created_at) VALUES (?,?,?,?)',
@@ -308,7 +337,7 @@ class Languages:
                     f'({NATIVE.get(code,LANGUAGES[code])}).\n\n'
                     f'**Assigned role:** {role.name}\n**Role ID:** `{role.id}`\n\n'
                     'If this language is not ready yet, set up its channels and iTranslator links manually. '
-                    'HR has not changed channel permissions or translation settings.')
+                    'HR uses saved language roles for configured language-channel access. Use /language audit to check access.')
             embed.set_footer(text=f'Member ID: {member.id} · Language: {code}')
             await owner.send(embed=embed,allowed_mentions=discord.AllowedMentions.none())
             status='sent'
@@ -326,7 +355,7 @@ class Languages:
                 await guild.chunk(cache=True)
             # Prepare the three requested roles without granting channel access.
             async with self.lock:
-                for code in ('EN','PT','FR'):
+                for code in READY_LANGUAGES:
                     await self.get_role(guild,code)
             done,failed=0,0
             for member in list(guild.members):
@@ -338,6 +367,9 @@ class Languages:
                     failed+=1
                     log.warning('Could not apply a default language role; check role hierarchy')
             log.info('Default language assignment complete: %s members, %s failures; previous choices preserved',done,failed)
+            await self.apply_channel_access(guild)
+            await self.prompt_members(guild)
+            await self.send_rollout_audit(guild)
             # One initial private report helps the owner configure existing choices.
             sent=await self.rows("SELECT value FROM language_settings WHERE key='owner_report_defaults_v1'")
             if not sent:
@@ -376,13 +408,13 @@ class Languages:
             raise ValueError('HR needs View Channel, Send Messages and Embed Links in the language picker channel.')
         embed=discord.Embed(title='🌐 CHOOSE MY LANGUAGE',color=0x3498DB,
             description='**New here or already a member? Everyone can choose.**\n\n'
-            '**English is your default.** Pick another language below if you prefer.\n\n'
+            '**Please confirm your language — including English speakers.** English stays your default until you choose.\n\n'
             'Press the button, find your language and select it. You can change your choice anytime.\n\n'
             '**Deutsch:** Wähle deine Sprache.\n**Português:** Escolha seu idioma.\n'
             '**Français:** Choisissez votre langue.\n**Español:** Elige tu idioma.\n'
-            '**Polski:** Wybierz swój język.\n**Русский:** Выберите свой язык.\n\n'
-            'Leadership will use your choices to set up the matching language channels. Guides will be handled later.')
-        embed.set_footer(text='Your role is visible on your profile. Other-language choices notify the server owner privately. Translation setup is manual.')
+            '**Polski:** Wybierz swój język.\n**Bahasa Indonesia:** Pilih bahasa Anda.\n**Русский:** Выберите свой язык.\n\n'
+            'Choose English, Português, Français, Deutsch, Polski, Bahasa Indonesia or another language. Your selection gives you one language role; it can be changed anytime. Guides will be handled later.')
+        embed.set_footer(text='Your selected role controls access where channel permissions are configured. Other-language choices notify the server owner privately.')
         message=None
         if settings.get('message') and settings.get('channel')==str(channel.id):
             try:
@@ -413,15 +445,134 @@ class Languages:
             lines.append(f'| {LANGUAGES[code]} — {NATIVE.get(code,LANGUAGES[code])} | {code} | {counts.get(code,0)} | {mappings.get(code,"Not created yet")} | {"Free" if code in FREE else "Premium/Pro"} |')
         if not codes:
             lines.append('| Nobody has chosen a language yet | — | 0 | — | — |')
-        lines.extend(['','Use the matching language role when setting up its translated channels. Roles are created only as needed.',
+        lines.extend(['','Use the matching language role when setting up its translated channels. English, Portuguese, French, German, Polish and Indonesian roles are prepared automatically.',
             'Use /language role to create a role before anyone selects it. Language roles have no server-wide permissions.',
             'Keep leadership channels restricted to leadership roles. Language selection does not replace roster verification.',
-            'This picker does not configure iTranslator or alter existing guides.',
+            'HR reconciles one saved language role and matching language-channel visibility. iTranslator routes are configured separately. Existing guides are unchanged.',
             'Catalogue reference: https://docs.itranslator.app/fundamentals/languages-list.md'])
         missed=await self.rows("SELECT code,COUNT(*) AS n FROM language_notifications WHERE status IN ('failed','sending') GROUP BY code")
         if missed:
             lines.extend(['','## Owner notifications needing review']+[f'- {LANGUAGES[r["code"]]}: {r["n"]} notifications could not be confirmed.' for r in missed])
         return '\n'.join(lines),counts
+
+    async def apply_channel_access(self,guild):
+        if not guild.me.guild_permissions.manage_roles:
+            log.warning('Language channel access needs Manage Roles');return
+        mappings={r['code']:int(r['role_id']) for r in await self.rows('SELECT * FROM language_roles')}
+        managed=set(mappings.values())
+        bots=[m for m in guild.members if m.bot and ('itranslator' in getattr(m,'name','').casefold() or (getattr(guild.me,'id',None) is not None and m.id==guild.me.id))]
+        done,failed=0,0
+        for channel in getattr(guild,'text_channels',[]):
+            code=channel_language(channel.name)
+            if not code:continue
+            try:
+                role=await self.get_role(guild,code)
+                backup=[{'id':t.id,'type':'role' if isinstance(t,discord.Role) else 'member','allow':ow.pair()[0].value,'deny':ow.pair()[1].value} for t,ow in channel.overwrites.items()]
+                async with aiosqlite.connect(self.database) as db:
+                    await db.execute('INSERT OR IGNORE INTO language_access_backup VALUES (?,?,?)',(CAMPAIGN_KEY,str(channel.id),json.dumps(backup)));await db.commit()
+                async def set_view(target,value,history=None):
+                    ow=channel.overwrites_for(target)
+                    if ow.view_channel==value and (history is None or ow.read_message_history==history):return
+                    ow.view_channel=value
+                    if history is not None:ow.read_message_history=history
+                    await channel.set_permissions(target,overwrite=ow,reason='OOPZ owner requested one language channel set per member; previous settings backed up')
+                # Keep the bots reachable before restricting broad channel grants.
+                for member in bots:await set_view(member,True,True)
+                await set_view(role,True,True)
+                for target,ow in list(channel.overwrites.items()):
+                    if target.id in {role.id,guild.default_role.id}:continue
+                    if isinstance(target,discord.Role):
+                        if target.id in managed:await set_view(target,False)
+                        elif ow.view_channel is True and not target.managed and not staff_target(target):await set_view(target,None)
+                    elif not target.bot and target.id!=guild.owner_id and not staff_target(target) and ow.view_channel is True:
+                        await set_view(target,None)
+                await set_view(guild.default_role,False)
+                done+=1
+            except (ValueError,discord.HTTPException) as exc:
+                failed+=1;log.warning('Language access needs attention: #%s (%s)',channel.name,type(exc).__name__)
+        log.info('Language channel access checked: %s channels, %s failures; backups saved',done,failed)
+
+    async def prompt_members(self,guild):
+        settings={r['key']:r['value'] for r in await self.rows('SELECT * FROM language_settings')}
+        if settings.get(CAMPAIGN_KEY):return
+        channel=guild.get_channel(int(settings['channel'])) if settings.get('channel') else None
+        if channel is None:return
+        p=channel.permissions_for(guild.me)
+        async with aiosqlite.connect(self.database) as db:
+            cur=await db.execute('INSERT OR IGNORE INTO language_settings VALUES (?,?)',(CAMPAIGN_KEY,'claimed'))
+            await db.commit()
+            if not cur.rowcount:return
+        try:
+            message=await channel.send(content=('@everyone ' if p.mention_everyone else '')+
+                '🌐 **EVERYONE: PLEASE CONFIRM YOUR LANGUAGE**\n'
+                'Already a member? Please choose too — even if you want English.\n'
+                '**English · Português · Français · Deutsch · Polski · Bahasa Indonesia**\n'
+                'Press **Choose my language** below. Your existing language stays until you choose. '
+                'HR assigns one language role; you can change your choice anytime.\n'
+                '**Polski:** Wybierz swój język. **Bahasa Indonesia:** Pilih bahasa Anda.',
+                view=PublicPicker(self),allowed_mentions=discord.AllowedMentions(everyone=p.mention_everyone,users=False,roles=False))
+            async with aiosqlite.connect(self.database) as db:
+                await db.execute('UPDATE language_settings SET value=? WHERE key=?',(f'sent:{message.id}',CAMPAIGN_KEY));await db.commit()
+            log.info('Language confirmation prompt published: everyone_ping=%s',p.mention_everyone)
+        except Exception as exc:
+            log.warning('Language prompt delivery needs review: %s',type(exc).__name__)
+
+    async def member_audit(self,guild):
+        if not guild.chunked:await guild.chunk(cache=True)
+        if not guild.chunked:raise ValueError('Full Discord member list unavailable; try again shortly.')
+        prefs={int(r['member_id']):r['code'] for r in await self.rows('SELECT * FROM language_preferences')}
+        confirmed={int(r['member_id']) for r in await self.rows('SELECT member_id FROM language_confirmed')}
+        mappings={r['code']:int(r['role_id']) for r in await self.rows('SELECT * FROM language_roles')}
+        channels=[(c,channel_language(c.name)) for c in guild.text_channels if channel_language(c.name)]
+        managed=set(mappings.values())
+        lines=['# OOPZ language confirmations and access audit','',
+            'Only members can confirm their own language; English defaults are not confirmations.',
+            'Staff (R4/R5) and administrator visibility is excluded from member-channel warnings. The server owner always sees all channels.',
+            '', '| Member | Saved language | Confirmed | Language roles | Channel access issues |','|---|---|---|---|---|']
+        counts={'members':0,'unconfirmed':0,'role_issues':0,'access_issues':0}
+        for member in guild.members:
+            if member.bot:continue
+            counts['members']+=1
+            code=prefs.get(member.id,'EN')
+            actual={r.id for r in member.roles if r.id in managed}
+            role_bad=actual!={mappings.get(code)}
+            if role_bad:counts['role_issues']+=1
+            if member.id not in confirmed:counts['unconfirmed']+=1
+            staff=staff_target(member)
+            issues=[]
+            if not staff:
+                if not any(language==code for _,language in channels):issues.append('No channels configured for '+code)
+                for c,language in channels:
+                    visible=c.permissions_for(member).view_channel
+                    if visible and language!=code:issues.append('Can see #'+c.name)
+                    elif not visible and language==code:issues.append('Cannot see #'+c.name)
+            if issues:counts['access_issues']+=1
+            name=discord.utils.escape_markdown(member.display_name).replace('|','/').replace('\n',' ')
+            actual_names=', '.join(r.name for r in member.roles if r.id in managed) or 'MISSING'
+            lines.append(f'| {name} | {code} | {"Yes" if member.id in confirmed else "PLEASE CHOOSE"} | {actual_names}{" — FIX NEEDED" if role_bad else ""} | {"; ".join(issues) or "OK"} |')
+        lines+=['','## Channel setup checklist']
+        for c,code in channels:
+            broad=[getattr(target,'name',str(target.id)) for target,ow in c.overwrites.items() if isinstance(target,discord.Role) and ow.view_channel is True and target.id not in managed and target.id not in LEADERS and not target.managed and not staff_target(target)]
+            lines.append(f'- #{c.name}: use {role_name(code)} (role ID {mappings.get(code,"not created")}).'+(' Review broad View Channel grants: '+', '.join(broad) if broad else ''))
+        lines+=['','Counts: '+', '.join(f'{k}: {v}' for k,v in counts.items()),
+            'For each language channel: @everyone View Channel denied; matching language role allowed. Broad member/rank grants can expose other languages. Keep iTranslator and HR access. Keep leadership channels private.']
+        return '\n'.join(lines),counts
+
+    async def send_rollout_audit(self,guild):
+        key='language_access_audit_20261108'
+        if await self.rows('SELECT value FROM language_settings WHERE key=?',(key,)):return
+        try:
+            report,counts=await self.member_audit(guild)
+            owner=self.bot.get_user(guild.owner_id) or await self.bot.fetch_user(guild.owner_id)
+            await owner.send('🌐 **Language setup check**\nEnglish, Portuguese, French, German, Polish and Indonesian roles are ready. '
+                f'{counts["unconfirmed"]} members still need to confirm a language. '
+                f'{counts["role_issues"]} role issues; {counts["access_issues"]} members with channel-access issues. '
+                'The attached private report lists exactly what needs checking. Use /language audit for a fresh copy.',
+                file=discord.File(io.BytesIO(report.encode()),filename='oopz-language-access-audit.md'),allowed_mentions=discord.AllowedMentions.none())
+            async with aiosqlite.connect(self.database) as db:
+                await db.execute('INSERT OR REPLACE INTO language_settings VALUES (?,?)',(key,'sent'));await db.commit()
+        except Exception as exc:
+            log.warning('Language audit DM needs attention: %s',type(exc).__name__)
 
     async def start(self):
         await self.init()
@@ -455,8 +606,21 @@ def install(bot,database,guild_id):
         if member.guild.id==guild_id and not member.bot:
             try:
                 await service.select(member,'EN',notify=False,default=True)
+                settings={r['key']:r['value'] for r in await service.rows('SELECT * FROM language_settings')}
+                if settings.get('channel'):
+                    try:await member.send(f'🌐 Welcome to OOPZ! Please confirm your language here: https://discord.com/channels/{guild_id}/{settings["channel"]}. English stays your default until you choose. Polski and Bahasa Indonesia are available too.',allowed_mentions=discord.AllowedMentions.none())
+                    except discord.HTTPException:pass
             except (ValueError,discord.HTTPException):
                 log.warning('New member default language could not be assigned')
+
+    @bot.listen('on_member_update')
+    async def reconcile_language_roles(before,after):
+        if after.guild.id!=guild_id or after.bot:return
+        if {r.id for r in before.roles}=={r.id for r in after.roles}:return
+        managed={int(r['role_id']) for r in await service.rows('SELECT role_id FROM language_roles')}
+        if ({r.id for r in before.roles} ^ {r.id for r in after.roles}) & managed:
+            try:await service.select(after,'EN',notify=False,default=True)
+            except (ValueError,discord.HTTPException):log.warning('Language role repair needs leadership attention')
 
     @group.command(name='choose',description='Choose or change your preferred language; everyone can use this')
     @app_commands.autocomplete(language=autocomplete)
@@ -513,6 +677,23 @@ def install(bot,database,guild_id):
             await interaction.followup.send(str(exc),ephemeral=True)
             return
         await interaction.followup.send(f'Language role ready: **{created.name}**\nRole ID: `{created.id}`. Use this role for its matching translated channels.',ephemeral=True)
+
+    @group.command(name='audit',description='Privately list unconfirmed languages, incorrect roles and channel visibility issues')
+    async def audit(interaction:discord.Interaction):
+        if not await leader(interaction):return
+        await interaction.response.defer(ephemeral=True)
+        try:report,counts=await service.member_audit(interaction.guild)
+        except (ValueError,discord.HTTPException) as exc:
+            await interaction.followup.send(str(exc),ephemeral=True);return
+        await interaction.followup.send(f'**{counts["unconfirmed"]} need to choose**, **{counts["role_issues"]} role issues**, **{counts["access_issues"]} members with channel-access issues**. Private details attached.',
+            file=discord.File(io.BytesIO(report.encode()),filename='oopz-language-access-audit.md'),ephemeral=True,allowed_mentions=discord.AllowedMentions.none())
+
+    @group.command(name='repair',description='Restore saved language roles and matching language-channel access')
+    async def repair(interaction:discord.Interaction):
+        if not await leader(interaction):return
+        await interaction.response.defer(ephemeral=True)
+        await service.assign_defaults(interaction.guild)
+        await interaction.followup.send('Saved language roles and language-channel access reconciled. Use /language audit to check any remaining role or channel-access issues.',ephemeral=True)
 
     @group.command(name='status',description='Check HR language permissions, picker and saved choices')
     async def status(interaction:discord.Interaction):
