@@ -181,6 +181,15 @@ async def init_db():
                 value TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS alt_accounts (
+                player_key TEXT PRIMARY KEY,
+                player_uid TEXT,
+                player_name TEXT NOT NULL,
+                owner_discord_id INTEGER NOT NULL,
+                marked_by INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             """
         )
         member_cols = [row[1] for row in await db.execute_fetchall("PRAGMA table_info(members)")]
@@ -1763,16 +1772,28 @@ async def missing_discord(interaction: discord.Interaction):
             matched.add(identity[0])
         else:
             unresolved += 1
+    alt_rows = await db_fetchall('SELECT * FROM alt_accounts')
+    alt_coverage = current_alt_coverage(alt_rows, roster, guild.members)
+    direct_count = len(matched)
+    covered_alts = set(alt_coverage) - matched
+    matched.update(covered_alts)
     missing = sorted(set(roster) - matched, key=str.casefold)
     imported = await db_fetchone("SELECT value FROM meta WHERE key='last_import_at'")
     last_import = imported['value'] if imported else 'Unknown'
     lines = ['OOPZ — ROSTER PLAYERS NOT MATCHED ON DISCORD',
              f'Generated: {iso()}', f'Last roster import: {last_import}',
              f'Roster: {len(roster)} | Matched: {len(matched)} | Not matched: {len(missing)}',
+             f'Direct Discord matches: {direct_count} | Alts covered by a current Discord owner: {len(covered_alts)}',
              f'Current Discord members with unresolved roster identity: {unresolved}', '',
              'This compares the saved roster with current Discord members, including offline members.',
              'Saved player UID links take priority. Someone using an unrecognised nickname may already be here.',
              'Check nicknames or use /link_member before assuming someone has not joined.', '']
+    if covered_alts:
+        lines += ['ALTS COVERED BY THEIR OWNER (not missing):']
+        for name in sorted(covered_alts, key=str.casefold):
+            owner = alt_coverage[name]
+            lines.append(f'- {name} | Owner: {owner.display_name} | Discord ID {owner.id}')
+        lines += ['', 'STILL NOT MATCHED:']
     for name in missing:
         info = roster[name]
         lines.append(f"- {name} | Rank {info.get('rank') or '?'} | HQ {info.get('level') or '?'}")
@@ -1780,10 +1801,164 @@ async def missing_discord(interaction: discord.Interaction):
         lines.append('Everyone in the saved roster is matched to a current Discord member.')
     await interaction.followup.send(
         f'**{len(missing)} roster players are not matched to a current Discord member.** '
-        f'({len(matched)} matched out of {len(roster)}.) The private list is attached. '
+        f'({direct_count} direct matches + {len(covered_alts)} alts covered by their owner, out of {len(roster)}.) The private list is attached. '
         'Unrecognised nicknames can also appear as missing; check before chasing people.',
         file=discord.File(io.BytesIO("\n".join(lines).encode('utf-8')), filename='oopz-missing-discord.txt'),
         ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
+def current_alt_coverage(rows, roster, members):
+    """An alt only counts when its linked human owner is currently in Discord."""
+    humans = {m.id: m for m in members if not m.bot}
+    uids = roster_by_uid(roster)
+    covered = {}
+    for row in rows:
+        owner = humans.get(int(row['owner_discord_id']))
+        if owner is None:
+            continue
+        if row['player_uid']:
+            entry = uids.get(row['player_uid'])
+            name = entry[0] if entry else None
+        else:
+            name = row['player_name'] if row['player_name'] in roster else None
+            # Never transfer a name-only link to a new account with a known UID.
+            if name and roster[name].get('uid'):
+                name = None
+        if name:
+            covered[name] = owner
+    return covered
+
+
+def alt_staff(interaction):
+    return interaction.guild_id == GUILD_ID and (admin_only(interaction) or
+        bool({r.id for r in getattr(interaction.user, 'roles', [])} & {1548703462332694618, 1548703579055857774}))
+
+
+async def alt_permission(interaction):
+    if not alt_staff(interaction):
+        await interaction.response.send_message('Only OOPZ R4/R5 or Manage Server staff can manage alts.', ephemeral=True)
+        return False
+    await interaction.response.defer(ephemeral=True)
+    return True
+
+
+async def alt_autocomplete(interaction, current):
+    if not alt_staff(interaction):
+        return []
+    roster = await get_roster()
+    names = set(roster)
+    names.update(r['player_name'] for r in await db_fetchall('SELECT player_name FROM alt_accounts'))
+    return [app_commands.Choice(name=n[:100], value=n[:100]) for n in sorted(names, key=str.casefold)
+            if current.casefold() in n.casefold()][:25]
+
+
+alt_group = app_commands.Group(name='alt', description='Link in-game alts to their Discord owner')
+
+
+@alt_group.command(name='add', description='Mark a roster account as an alt of a current Discord member')
+@app_commands.describe(player_name='The alt’s in-game name from the roster', owner='The Discord member who owns this alt')
+@app_commands.autocomplete(player_name=alt_autocomplete)
+async def alt_add(interaction: discord.Interaction, player_name: str, owner: discord.Member):
+    if not await alt_permission(interaction):
+        return
+    guild = interaction.guild
+    if owner.bot or owner.guild.id != GUILD_ID or guild.get_member(owner.id) is None:
+        await interaction.followup.send('Choose a human owner who is currently in OOPZ Discord.', ephemeral=True)
+        return
+    roster = await get_roster()
+    name = player_name if player_name in roster else relaxed_roster_name_match(player_name, roster)
+    if not name:
+        await interaction.followup.send('Choose the alt’s exact name from the current roster. Upload a fresh roster first if needed.', ephemeral=True)
+        return
+    if not guild.chunked:
+        try:
+            await guild.chunk(cache=True)
+        except Exception:
+            pass
+    if not guild.chunked:
+        await interaction.followup.send('The Discord member list is incomplete. Try again shortly.', ephemeral=True)
+        return
+    rows = await db_fetchall('SELECT discord_id, last_verified_name, last_verified_uid, ever_verified FROM members')
+    by_id = {int(r['discord_id']): r for r in rows}
+    for member in guild.members:
+        if member.bot:
+            continue
+        identity = await resolve_roster_identity(member, roster, by_id.get(member.id))
+        if identity and identity[0] == name:
+            await interaction.followup.send('That account already has a direct Discord match. It is already counted as present; its main identity link was preserved.', ephemeral=True)
+            return
+    uid = roster[name].get('uid')
+    key = 'uid:' + uid if uid else 'name:' + name
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        # A unique key prevents concurrent commands from silently changing the owner.
+        cur = await db.execute('INSERT OR IGNORE INTO alt_accounts VALUES (?,?,?,?,?,?)',
+            (key, uid, name, owner.id, interaction.user.id, iso()))
+        await db.commit()
+        if not cur.rowcount:
+            await interaction.followup.send('This alt is already marked. Use /alt list to check its owner. To change it, /alt remove first, then /alt add.', ephemeral=True)
+            return
+    await interaction.followup.send(f'✅ **{discord.utils.escape_markdown(name)}** is marked as an alt of {owner.mention}. '
+        'It now counts as covered in /missing_discord while that owner is in this server. Their main account and roles are unchanged.',
+        ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+    await log_action(f'Alt marked: `{name}` → Discord owner {owner.id}, by {interaction.user.id}')
+
+
+@alt_group.command(name='remove', description='Remove an alt marker without changing its owner’s main link')
+@app_commands.autocomplete(player_name=alt_autocomplete)
+async def alt_remove(interaction: discord.Interaction, player_name: str):
+    if not await alt_permission(interaction):
+        return
+    roster = await get_roster()
+    name = player_name if player_name in roster else relaxed_roster_name_match(player_name, roster)
+    uid = roster.get(name, {}).get('uid') if name else None
+    rows = await db_fetchall('SELECT * FROM alt_accounts')
+    matches = [r for r in rows if (uid and r['player_uid'] == uid) or
+               r['player_name'].casefold() == player_name.casefold() or r['player_key'] == player_name]
+    if len(matches) != 1:
+        await interaction.followup.send('No unique saved alt marker found. Check /alt list and use its saved player name or player key.', ephemeral=True)
+        return
+    row = matches[0]
+    await db_execute('DELETE FROM alt_accounts WHERE player_key=?', (row['player_key'],))
+    await interaction.followup.send(f'Removed the alt marker for **{discord.utils.escape_markdown(row["player_name"])}**. The next /missing_discord report will check it normally.',
+        ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+    await log_action(f'Alt marker removed: `{row["player_name"]}`, by {interaction.user.id}')
+
+
+@alt_group.command(name='list', description='Privately list saved alts, owners and whether they count as present')
+async def alt_list(interaction: discord.Interaction):
+    if not await alt_permission(interaction):
+        return
+    guild = interaction.guild
+    if not guild.chunked:
+        try:
+            await guild.chunk(cache=True)
+        except Exception:
+            pass
+    if not guild.chunked:
+        await interaction.followup.send('The Discord member list is incomplete. Try again shortly.', ephemeral=True)
+        return
+    roster = await get_roster()
+    rows = await db_fetchall('SELECT * FROM alt_accounts ORDER BY player_name COLLATE NOCASE')
+    humans = {m.id: m for m in guild.members if not m.bot}
+    lines = ['OOPZ ALT ACCOUNTS', 'Alts only count while their linked human owner is in this Discord server.', '']
+    active = 0
+    for row in rows:
+        coverage = current_alt_coverage([row], roster, guild.members)
+        owner = humans.get(int(row['owner_discord_id']))
+        name = next(iter(coverage), row['player_name'])
+        if coverage:
+            active += 1
+        status = 'COVERED' if coverage else ('OWNER NOT IN DISCORD' if owner is None else 'NOT IN CURRENT ROSTER / LINK NEEDS REVIEW')
+        label = owner.display_name if owner else str(row['owner_discord_id'])
+        lines.append(f'- {name} | Owner: {label} | {status} | Player key: {row["player_key"]}')
+    if not rows:
+        lines.append('No alts marked yet. Use /alt add and choose the alt’s roster name and Discord owner.')
+    await interaction.followup.send(f'**{len(rows)} saved alts; {active} currently covered by their owner.** Private list attached.',
+        file=discord.File(io.BytesIO('\n'.join(lines).encode('utf-8')), filename='oopz-alts.txt'),
+        ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
+bot.tree.add_command(alt_group, guild=discord.Object(id=GUILD_ID))
 
 
 if __name__ == "__main__":
